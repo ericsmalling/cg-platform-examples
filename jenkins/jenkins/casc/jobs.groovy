@@ -24,6 +24,10 @@ def apps = [
     description: 'Flask app on Chainguard Python 3.14 with uv; archived as OCI image to ttl.sh',
   ],
   [
+    name: 'python314-uv-flask-inline',
+    description: 'Teaching twin of python314-uv-flask — same pipeline with every cg-images shared-library call (cgImage/cgLogin/cgSign/cgVerify) expanded inline for visibility. Hardcoded for Harbor proxy mode.',
+  ],
+  [
     name: 'python312-pip-django',
     description: 'Django site on Chainguard Python 3.12 with pip; archived as OCI image to ttl.sh',
   ],
