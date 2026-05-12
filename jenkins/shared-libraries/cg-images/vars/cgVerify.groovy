@@ -33,14 +33,15 @@ def call(String image) {
     // See cgSign.groovy for why we pass image/org via the environment
     // rather than interpolating them into the shell script body. The sh
     // body below is a single-quoted Groovy string so all ${...} is shell.
-    withEnv(["CGVERIFY_IMAGE=${image}", "CGVERIFY_ORG=${org}"]) {
+    // See cgSign.groovy for why we route the cosign image through PULL_REGISTRY.
+    def pullReg = env.PULL_REGISTRY ?: "cgr.dev/${org}"
+    withEnv(["CGVERIFY_IMAGE=${image}", "CGVERIFY_ORG=${org}", "CGVERIFY_PULL_REGISTRY=${pullReg}"]) {
       sh '''
         set -eu
         # Pick the RepoDigest whose repo matches the image we want to verify.
-        # See cgSign.groovy for why .RepoDigests can have stale entries from
-        # prior runs.
+        # See cgSign.groovy for the head-vs-tail rationale.
         REPO=${CGVERIFY_IMAGE%:*}
-        DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$CGVERIFY_IMAGE" | grep -F "${REPO}@" | head -1)
+        DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$CGVERIFY_IMAGE" | grep -F "${REPO}@" | tail -1)
         if [ -z "$DIGEST" ]; then
           echo "cgVerify: could not resolve digest for $CGVERIFY_IMAGE under repo $REPO (was it pushed?)." >&2
           exit 1
@@ -54,7 +55,7 @@ def call(String image) {
           -v "$DOCKER_CONFIG:/jenkins-docker:ro" \
           -e DOCKER_CONFIG=/jenkins-docker \
           --entrypoint=/usr/bin/cosign \
-          "cgr.dev/${CGVERIFY_ORG}/cosign:latest-dev" \
+          "${CGVERIFY_PULL_REGISTRY}/cosign:latest-dev" \
           verify --allow-http-registry --key /cosign.pub "$DIGEST" >/dev/null
         echo "cgVerify: signature OK for $DIGEST"
       '''

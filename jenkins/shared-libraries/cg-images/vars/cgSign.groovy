@@ -50,16 +50,26 @@ def call(String image) {
     // value that happens to contain a quote, $, or other shell-meaningful
     // character can't break out of the script. The sh body is a single-
     // quoted Groovy string so all ${...} below is pure shell, not Groovy.
-    withEnv(["CGSIGN_IMAGE=${image}", "CGSIGN_ORG=${org}"]) {
+    // PULL_REGISTRY routes the cosign image pull through whichever mirror
+    // tool is active (Harbor / distribution / zot / etc.). The host docker
+    // daemon has no cgr.dev creds in mirror modes, so a bare cgr.dev ref
+    // would 401 on cache miss. PULL_REGISTRY is set by setup.sh and falls
+    // back to cgr.dev/$ORG when nothing is.
+    def pullReg = env.PULL_REGISTRY ?: "cgr.dev/${org}"
+    withEnv(["CGSIGN_IMAGE=${image}", "CGSIGN_ORG=${org}", "CGSIGN_PULL_REGISTRY=${pullReg}"]) {
       sh '''
         set -eu
         # Pick the RepoDigest whose repo matches the image we just pushed.
         # The local image cache may have stale RepoDigests from prior runs
         # under different registries (e.g. localhost/library from a Mode C
-        # session, ttl.sh from a Mode A session) — `{{index .RepoDigests 0}}`
-        # returned whichever happened to be first and tripped cosign over.
+        # session, ttl.sh from a Mode A session). Additionally, re-pushing
+        # the same tag with new content APPENDS a new RepoDigest without
+        # removing the old one, so even after grep-filtering by repo we
+        # may still see multiple matches. Docker appends in chronological
+        # order, so `tail -1` picks the most recent push — the only digest
+        # that's still resolvable in the registry.
         REPO=${CGSIGN_IMAGE%:*}
-        DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$CGSIGN_IMAGE" | grep -F "${REPO}@" | head -1)
+        DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$CGSIGN_IMAGE" | grep -F "${REPO}@" | tail -1)
         if [ -z "$DIGEST" ]; then
           echo "cgSign: could not resolve digest for $CGSIGN_IMAGE under repo $REPO (was it pushed?)." >&2
           exit 1
@@ -79,7 +89,7 @@ def call(String image) {
           -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
           -e DOCKER_CONFIG=/jenkins-docker \
           --entrypoint=/usr/bin/cosign \
-          "cgr.dev/${CGSIGN_ORG}/cosign:latest-dev" \
+          "${CGSIGN_PULL_REGISTRY}/cosign:latest-dev" \
           sign --yes --allow-http-registry --key /cosign.key "$DIGEST"
         echo "cgSign: signed $DIGEST"
       '''
