@@ -1,0 +1,3 @@
+# Rendered from *.template by deploy.sh
+k8s/proxy/deployment.yaml
+k8s/hosted/deployment.yaml

@@ -10,21 +10,21 @@ jenkins:
         env:
           - key: CHAINGUARD_ORG
             value: ${CHAINGUARD_ORG}
-          # Registry routing — set by setup.sh:
-          # cgImage.groovy uses PULL_REGISTRY; OCI-image apps' IMAGE uses PUSH_REGISTRY;
-          # cgLogin.groovy short-circuits when HARBOR_ENABLED is true.
+          # Registry routing — set by setup.sh.
+          # cgLogin.groovy reads MIRROR_TOOL to pick its auth branch
+          # (none/harbor/distribution/zot/nexus-ce/jcr); cgImage.groovy and
+          # the Jenkinsfile bodies read PULL_REGISTRY / PUSH_REGISTRY.
+          # HARBOR_ENABLED is the legacy flag kept for backward compat.
+          - key: MIRROR_TOOL
+            value: ${MIRROR_TOOL:-none}
           - key: PULL_REGISTRY
             value: ${PULL_REGISTRY:-cgr.dev/${CHAINGUARD_ORG}}
           - key: PUSH_REGISTRY
             value: ${PUSH_REGISTRY:-ttl.sh/smalls}
+          - key: PUSH_AUTH
+            value: ${PUSH_AUTH:-none}
           - key: HARBOR_ENABLED
             value: ${HARBOR_ENABLED:-false}
-          # Surface the Harbor admin password to pipelines so cgLogin's
-          # Mode C path can read it from env.HARBOR_ADMIN_PASSWORD instead
-          # of hardcoding the chart default. Empty in Modes A/B; cgLogin
-          # only reads it on the Mode C push-auth path.
-          - key: HARBOR_ADMIN_PASSWORD
-            value: ${HARBOR_ADMIN_PASSWORD:-}
   securityRealm:
     local:
       allowsSignup: false
@@ -116,12 +116,7 @@ credentials:
               scope: GLOBAL
               id: cosign-password
               description: "passphrase that decrypts cosign-private-key"
-              # Read the passphrase directly from the bind-mounted secret file
-              # rather than via the controller's env. Avoids leaving the
-              # passphrase visible to `docker inspect` and prevents accidental
-              # propagation into build logs (the env-var path used to be one
-              # `echo $COSIGN_PASSWORD` in a debug step away from disclosure).
-              secret: "${readFile:/tmp/cgjenkins-home/.secrets/cosign.password}"
+              secret: "${COSIGN_PASSWORD}"
 
 jobs:
   - file: /tmp/cgjenkins-home/casc/jobs.groovy

@@ -8,10 +8,7 @@
 // the full sign-then-verify loop.
 //
 // Cosign runs in a one-shot container with --network host for the same
-// reason cgSign does — see that file for the full rationale. The cosign
-// helper image itself is pulled from $PULL_REGISTRY so it works whether
-// the controller has cgr.dev creds (Mode A) or only the anonymous Harbor
-// proxy (Modes B/C).
+// reason cgSign does — see that file for the full rationale.
 //
 // Usage from a stage on `agent any`:
 //
@@ -28,41 +25,36 @@ def call(String image) {
   if (!image?.trim()) {
     error('cgVerify: image argument is required')
   }
-  if (!env.CHAINGUARD_ORG) error('cgVerify: env.CHAINGUARD_ORG is empty — JCasC globalNodeProperties should set it from the controller env (see jenkins/jenkins/casc/jenkins.yaml in the repo). Re-run setup.sh.')
-  // Pass `image` through the sh step's environment rather than interpolating
-  // it into the script body — see cgSign.groovy for the same reasoning.
-  withEnv(["IMAGE=${image}"]) {
-    withCredentials([
-      file(credentialsId: 'cosign-public-key', variable: 'COSIGN_PUB_FILE'),
-    ]) {
+  def org = env.CHAINGUARD_ORG
+  if (!org) error('cgVerify: env.CHAINGUARD_ORG is empty — JCasC globalNodeProperties should set it from the controller env (jenkins/casc/jenkins.yaml). Re-run setup.sh.')
+  withCredentials([
+    file(credentialsId: 'cosign-public-key', variable: 'COSIGN_PUB_FILE'),
+  ]) {
+    // See cgSign.groovy for why we pass image/org via the environment
+    // rather than interpolating them into the shell script body. The sh
+    // body below is a single-quoted Groovy string so all ${...} is shell.
+    withEnv(["CGVERIFY_IMAGE=${image}", "CGVERIFY_ORG=${org}"]) {
       sh '''
-        set -eu -o pipefail
-        # pipefail so a failing `docker image inspect` is surfaced as the
-        # pipeline's exit status rather than masked by the trailing
-        # `head -1` returning 0. Split the inspect from the grep/head
-        # filter so a grep-no-match doesn't abort under set -e/pipefail
-        # before we can emit the friendly error below.
+        set -eu
         # Pick the RepoDigest whose repo matches the image we want to verify.
         # See cgSign.groovy for why .RepoDigests can have stale entries from
         # prior runs.
-        REPO="${IMAGE%:*}"
-        ALL_DIGESTS=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE")
-        DIGEST=$(printf '%s' "$ALL_DIGESTS" | grep -F "${REPO}@" | head -1 || true)
+        REPO=${CGVERIFY_IMAGE%:*}
+        DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$CGVERIFY_IMAGE" | grep -F "${REPO}@" | head -1)
         if [ -z "$DIGEST" ]; then
-          echo "cgVerify: could not resolve digest for $IMAGE under repo $REPO (was it pushed?)." >&2
+          echo "cgVerify: could not resolve digest for $CGVERIFY_IMAGE under repo $REPO (was it pushed?)." >&2
           exit 1
         fi
         # See cgSign.groovy for why we rewrite bare 'localhost' to 'localhost:80'.
         case "$DIGEST" in
           localhost/*) DIGEST="localhost:80/${DIGEST#localhost/}" ;;
         esac
-        COSIGN_IMAGE="${PULL_REGISTRY:-cgr.dev/${CHAINGUARD_ORG}}/cosign:latest-dev"
         docker run --rm --network host \
           -v "$COSIGN_PUB_FILE:/cosign.pub:ro" \
           -v "$DOCKER_CONFIG:/jenkins-docker:ro" \
           -e DOCKER_CONFIG=/jenkins-docker \
           --entrypoint=/usr/bin/cosign \
-          "$COSIGN_IMAGE" \
+          "cgr.dev/${CGVERIFY_ORG}/cosign:latest-dev" \
           verify --allow-http-registry --key /cosign.pub "$DIGEST" >/dev/null
         echo "cgVerify: signature OK for $DIGEST"
       '''

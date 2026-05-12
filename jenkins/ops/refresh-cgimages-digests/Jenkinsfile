@@ -27,11 +27,7 @@ pipeline {
     stage('Refresh digests') {
       agent {
         docker {
-          // Pull crane via PULL_REGISTRY (cgr.dev/<org> in Mode A,
-          // localhost/cgr-proxy/<org> in Modes B/C where the controller
-          // has no cgr.dev creds — same routing as cgImage() applies to
-          // the application build/test agents).
-          image "${env.PULL_REGISTRY ?: "cgr.dev/${env.CHAINGUARD_ORG}"}/crane:latest-dev"
+          image "cgr.dev/${env.CHAINGUARD_ORG}/crane:latest-dev"
           // The agent inherits the controller's mounts via `--volumes-from`
           // (Jenkins docker-workflow plugin default), so the shared-libraries
           // tree (rw) and the pull-token docker config are already visible at
@@ -49,12 +45,7 @@ pipeline {
           //      cgr.dev directly in Mode A, anonymous Harbor proxy in B/C.
           //      The docker-workflow plugin only carries env vars listed
           //      here into the agent container.
-          // Use `?: ''` (not direct interpolation) so a missing env var
-          // collapses to empty rather than the literal "null" — Groovy
-          // GString stringifies a null reference, which would otherwise
-          // bake PULL_REGISTRY=null into the agent env and break the
-          // PULL_REGISTRY:-default fallback in refresh-digests.sh.
-          args "--entrypoint= --network host -e DOCKER_CONFIG=/tmp/cgjenkins-home/.docker -e CHAINGUARD_ORG=${env.CHAINGUARD_ORG ?: ''} -e PULL_REGISTRY=${env.PULL_REGISTRY ?: ''}"
+          args "--entrypoint= --network host -e DOCKER_CONFIG=/tmp/cgjenkins-home/.docker -e CHAINGUARD_ORG=${env.CHAINGUARD_ORG} -e PULL_REGISTRY=${env.PULL_REGISTRY}"
           reuseNode true
         }
       }

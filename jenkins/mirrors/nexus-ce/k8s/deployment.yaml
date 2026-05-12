@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-ce
+  namespace: mirror-nexus-ce
+  labels:
+    app.kubernetes.io/name: nexus-ce
+spec:
+  replicas: 1
+  # Recreate avoids two pods racing for the same RWO PVC during rollouts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus-ce
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus-ce
+    spec:
+      # The sonatype/nexus3 image runs as uid 200 by default; let the image
+      # set its own user. fsGroup ensures the PVC mount is writable by 200.
+      securityContext:
+        fsGroup: 200
+      containers:
+        - name: nexus
+          image: sonatype/nexus3:3.91.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+            - name: docker-pull
+              containerPort: 5053
+              protocol: TCP
+            - name: docker-push
+              containerPort: 5060
+              protocol: TCP
+          env:
+            # 2 GiB JVM heap matches the resource request; INSTALL4J_ADD_VM_PARAMS
+            # is the documented escape hatch for the Nexus image.
+            - name: INSTALL4J_ADD_VM_PARAMS
+              value: "-Xms1g -Xmx2g -XX:MaxDirectMemorySize=1g -Djava.util.prefs.userRoot=/nexus-data/javaprefs"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          # Nexus is JVM-based and slow: ~2-3 minutes from container start to
+          # the REST API answering. Generous initialDelay + failureThreshold so
+          # the kubelet doesn't kill it during startup.
+          startupProbe:
+            httpGet:
+              path: /service/rest/v1/status
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /service/rest/v1/status
+              port: 8081
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /service/rest/v1/status
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          volumeMounts:
+            - name: nexus-data
+              mountPath: /nexus-data
+      volumes:
+        - name: nexus-data
+          persistentVolumeClaim:
+            claimName: nexus-ce-data

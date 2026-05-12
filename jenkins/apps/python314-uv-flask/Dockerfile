@@ -3,21 +3,15 @@
 # ships uv pre-installed). Stage 2 then copies the populated site-packages
 # directory into the shell-less runtime python image — same Python minor
 # version on both sides keeps the packages compatible.
-#
-# PULL_REGISTRY (passed by the Jenkinsfile via --build-arg) lets Modes B/C
-# route the FROM pulls through the Harbor proxy (`localhost/cgr-proxy/<org>`)
-# instead of cgr.dev directly — the host docker daemon has no cgr.dev creds
-# in those modes. In Mode A it's just `cgr.dev/<org>`, which the cgLogin
-# chainctl flow has authenticated.
-ARG PULL_REGISTRY
+ARG CHAINGUARD_ORG
 
-FROM ${PULL_REGISTRY}/python:3.14-dev AS build
+FROM cgr.dev/${CHAINGUARD_ORG}/python:3.14-dev AS build
 USER 0
 WORKDIR /app
 COPY pyproject.toml ./
 RUN uv pip install --system --no-cache flask
 
-FROM ${PULL_REGISTRY}/python:3.14
+FROM cgr.dev/${CHAINGUARD_ORG}/python:3.14
 COPY --from=build /usr/lib/python3.14/site-packages /usr/lib/python3.14/site-packages
 COPY app.py /app/app.py
 WORKDIR /app

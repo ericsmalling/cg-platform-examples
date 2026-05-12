@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zot
+  namespace: mirror-zot
+  labels:
+    app.kubernetes.io/name: zot
+spec:
+  # NodePort 30052 maps to host port 5052 via the shared kind config in
+  # mirrors/_common/kind/config.yaml. Pipelines and `docker pull` reach
+  # zot at localhost:5052.
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: zot
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      nodePort: 30052
+      protocol: TCP

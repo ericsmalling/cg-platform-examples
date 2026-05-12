@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zot
+  namespace: mirror-zot
+  labels:
+    app.kubernetes.io/name: zot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zot
+    spec:
+      # zot's published image runs as UID 10001 by default; pin it here so
+      # the volumeMount on /var/lib/registry is owned correctly and so we
+      # never run as root.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        runAsNonRoot: true
+      containers:
+        - name: zot
+          image: ghcr.io/project-zot/zot-linux-amd64:v2.1.13
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - /etc/zot/config.json
+          ports:
+            - name: http
+              containerPort: 5000
+          # zot serves the OCI distribution-spec API at /v2/. A 200 OK on
+          # /v2/ proves both the HTTP listener and the storage driver are
+          # alive without exercising sync (which depends on the proxy).
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/zot
+              readOnly: true
+            - name: storage
+              mountPath: /var/lib/registry
+      volumes:
+        - name: config
+          configMap:
+            name: zot-config
+            items:
+              - key: config.json
+                path: config.json
+        # emptyDir is sufficient for the demo — synced layers and pushed
+        # artifacts disappear with the pod, which is fine since teardown
+        # tears the whole kind cluster anyway.
+        - name: storage
+          emptyDir: {}

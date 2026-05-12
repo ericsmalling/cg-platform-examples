@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jcr
+  namespace: mirror-jcr
+  labels:
+    app.kubernetes.io/name: jcr
+spec:
+  replicas: 1
+  # Recreate avoids two pods racing for the same RWO PVC during rollouts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jcr
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jcr
+    spec:
+      # The artifactory-jcr image runs as uid 1030 (artifactory) by default;
+      # let the image set its own user. fsGroup ensures the PVC mount is
+      # writable by that uid.
+      securityContext:
+        fsGroup: 1030
+      containers:
+        - name: jcr
+          image: releases-docker.jfrog.io/jfrog/artifactory-jcr:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            # JCR exposes a single HTTP port (8082) for both UI/REST and
+            # Docker pulls. Docker clients address repos by path on this
+            # same port. The Service exposes 8082 twice (once for the UI
+            # NodePort, once for the docker NodePort) — both targetPort
+            # the same containerPort.
+            - name: http
+              containerPort: 8082
+              protocol: TCP
+          env:
+            # Recent JCR/Artifactory releases removed the embedded-Derby
+            # path; PostgreSQL is the only supported database. We deploy
+            # a sidecar Postgres in this namespace (postgres.yaml).
+            - name: JF_SHARED_DATABASE_TYPE
+              value: postgresql
+            - name: JF_SHARED_DATABASE_DRIVER
+              value: org.postgresql.Driver
+            - name: JF_SHARED_DATABASE_URL
+              value: jdbc:postgresql://postgres.mirror-jcr.svc.cluster.local:5432/artifactory
+            - name: JF_SHARED_DATABASE_USERNAME
+              value: artifactory
+            - name: JF_SHARED_DATABASE_PASSWORD
+              value: password
+            # Single-node setup (no clustering); avoids cluster-join retry
+            # loops if the Access service is slow to bind.
+            - name: JF_SHARED_NODE_HAENABLED
+              value: "false"
+            # JCR's boot scripts read `topology.enabled` from system.yaml
+            # (defaults to true) and, when true, override
+            # JF_ACCESS_USEEXTERNALTOPOLOGY=true regardless of any env
+            # setting. That tells the Router to *not* start a local Access
+            # service — it expects one running externally in a multi-
+            # container JFrog deployment. For our single-container JCR
+            # demo we disable external topology so Access starts locally.
+            - name: JF_TOPOLOGY_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 6Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          # JCR is JVM-based and slow: 4-5 minutes from container start to
+          # the REST API answering on a cold PVC. Generous initialDelay +
+          # failureThreshold so the kubelet doesn't kill it during startup.
+          startupProbe:
+            httpGet:
+              path: /artifactory/api/system/ping
+              port: 8082
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /artifactory/api/system/ping
+              port: 8082
+            initialDelaySeconds: 240
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /artifactory/api/system/ping
+              port: 8082
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          volumeMounts:
+            - name: jcr-data
+              mountPath: /var/opt/jfrog/artifactory
+      volumes:
+        # emptyDir (not the PVC) — kind's local-path provisioner is slow
+        # enough on small machines to stall JCR's first-boot Access init.
+        # State doesn't survive a teardown but that's fine for a demo.
+        - name: jcr-data
+          emptyDir: {}

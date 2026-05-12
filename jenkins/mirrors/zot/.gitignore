@@ -1,0 +1,2 @@
+# Rendered from configmap.yaml.template by deploy.sh
+k8s/configmap.yaml

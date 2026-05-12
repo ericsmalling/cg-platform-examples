@@ -22,12 +22,6 @@
 // wrote earlier in the pipeline (Harbor admin creds in Mode C; nothing
 // needed in A/B since signatures push anonymously to ttl.sh).
 //
-// The cosign helper image itself is pulled from $PULL_REGISTRY (not
-// cgr.dev directly) — that's cgr.dev/<org> in Mode A but the anonymous
-// Harbor proxy at localhost/cgr-proxy/<org> in Modes B/C, where the
-// controller has no cgr.dev creds. Same routing as cgImage() uses for
-// the application build/test agents.
-//
 // Usage from a stage on `agent any`:
 //
 //   stage('Sign') {
@@ -45,35 +39,29 @@ def call(String image) {
   if (!image?.trim()) {
     error('cgSign: image argument is required')
   }
-  if (!env.CHAINGUARD_ORG) error('cgSign: env.CHAINGUARD_ORG is empty — JCasC globalNodeProperties should set it from the controller env (see jenkins/jenkins/casc/jenkins.yaml in the repo). Re-run setup.sh.')
-  // Pass `image` through the sh step's environment rather than interpolating
-  // it into the script body — otherwise an image ref containing a single
-  // quote (or other shell metacharacter) could break out of the surrounding
-  // quoting. CHAINGUARD_ORG and PULL_REGISTRY are already exposed to the
-  // shell by Jenkins.
-  withEnv(["IMAGE=${image}"]) {
-    withCredentials([
-      file(credentialsId: 'cosign-private-key', variable: 'COSIGN_KEY_FILE'),
-      string(credentialsId: 'cosign-password',  variable: 'COSIGN_PASSWORD'),
-    ]) {
+  def org = env.CHAINGUARD_ORG
+  if (!org) error('cgSign: env.CHAINGUARD_ORG is empty — JCasC globalNodeProperties should set it from the controller env (jenkins/casc/jenkins.yaml). Re-run setup.sh.')
+  withCredentials([
+    file(credentialsId: 'cosign-private-key', variable: 'COSIGN_KEY_FILE'),
+    string(credentialsId: 'cosign-password',  variable: 'COSIGN_PASSWORD'),
+  ]) {
+    // Pass IMAGE and CGR_ORG via the environment (not Groovy string
+    // interpolation into a shell script) so an image reference or org
+    // value that happens to contain a quote, $, or other shell-meaningful
+    // character can't break out of the script. The sh body is a single-
+    // quoted Groovy string so all ${...} below is pure shell, not Groovy.
+    withEnv(["CGSIGN_IMAGE=${image}", "CGSIGN_ORG=${org}"]) {
       sh '''
-        set -eu -o pipefail
-        # pipefail so a failing `docker image inspect` is surfaced as the
-        # pipeline's exit status rather than masked by the trailing
-        # `head -1` returning 0. Split the inspect from the grep/head
-        # filter so a grep-no-match (legitimate "no RepoDigest matches
-        # this repo yet" case) doesn't abort under set -e/pipefail
-        # before we can emit the friendly error below.
+        set -eu
         # Pick the RepoDigest whose repo matches the image we just pushed.
         # The local image cache may have stale RepoDigests from prior runs
         # under different registries (e.g. localhost/library from a Mode C
         # session, ttl.sh from a Mode A session) — `{{index .RepoDigests 0}}`
         # returned whichever happened to be first and tripped cosign over.
-        REPO="${IMAGE%:*}"
-        ALL_DIGESTS=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE")
-        DIGEST=$(printf '%s' "$ALL_DIGESTS" | grep -F "${REPO}@" | head -1 || true)
+        REPO=${CGSIGN_IMAGE%:*}
+        DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$CGSIGN_IMAGE" | grep -F "${REPO}@" | head -1)
         if [ -z "$DIGEST" ]; then
-          echo "cgSign: could not resolve digest for $IMAGE under repo $REPO (was it pushed?)." >&2
+          echo "cgSign: could not resolve digest for $CGSIGN_IMAGE under repo $REPO (was it pushed?)." >&2
           exit 1
         fi
         # cosign's reference parser (via go-containerregistry) doesn't accept
@@ -85,19 +73,13 @@ def call(String image) {
         case "$DIGEST" in
           localhost/*) DIGEST="localhost:80/${DIGEST#localhost/}" ;;
         esac
-        COSIGN_IMAGE="${PULL_REGISTRY:-cgr.dev/${CHAINGUARD_ORG}}/cosign:latest-dev"
-        # Pass COSIGN_PASSWORD by NAME (no =value) so docker inherits it from
-        # this shell's env instead of placing it on the docker-run command
-        # line — where it would briefly be visible via `ps` / docker event
-        # logs. withCredentials already exported COSIGN_PASSWORD into the
-        # shell env for us.
         docker run --rm --network host \
           -v "$COSIGN_KEY_FILE:/cosign.key:ro" \
           -v "$DOCKER_CONFIG:/jenkins-docker:ro" \
-          -e COSIGN_PASSWORD \
+          -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
           -e DOCKER_CONFIG=/jenkins-docker \
           --entrypoint=/usr/bin/cosign \
-          "$COSIGN_IMAGE" \
+          "cgr.dev/${CGSIGN_ORG}/cosign:latest-dev" \
           sign --yes --allow-http-registry --key /cosign.key "$DIGEST"
         echo "cgSign: signed $DIGEST"
       '''

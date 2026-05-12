@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: distribution-hosted
+  namespace: mirror-distribution
+  labels:
+    app: distribution-hosted
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: distribution-hosted
+  template:
+    metadata:
+      labels:
+        app: distribution-hosted
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: ${DISTRIBUTION_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "/etc/distribution/config.yml"]
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/distribution
+              readOnly: true
+            - name: storage
+              mountPath: /var/lib/registry
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: distribution-hosted-config
+            items:
+              - key: config.yml
+                path: config.yml
+        - name: storage
+          emptyDir: {}

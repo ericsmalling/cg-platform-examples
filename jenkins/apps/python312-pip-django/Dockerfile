@@ -4,18 +4,15 @@
 # install. Stage 2 then copies the populated site-packages into the shell-less
 # python:3.12 runtime image — same Python minor version on both sides keeps
 # the packages compatible.
-#
-# PULL_REGISTRY routes pulls through the Harbor proxy in Modes B/C; see the
-# python314-uv-flask Dockerfile for the full rationale.
-ARG PULL_REGISTRY
+ARG CHAINGUARD_ORG
 
-FROM ${PULL_REGISTRY}/python:3.12-dev AS build
+FROM cgr.dev/${CHAINGUARD_ORG}/python:3.12-dev AS build
 USER 0
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-FROM ${PULL_REGISTRY}/python:3.12
+FROM cgr.dev/${CHAINGUARD_ORG}/python:3.12
 COPY --from=build /usr/lib/python3.12/site-packages /usr/lib/python3.12/site-packages
 COPY app.py /app/app.py
 WORKDIR /app

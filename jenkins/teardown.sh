@@ -5,7 +5,7 @@
 #   - Jenkins controller container + image
 #   - JENKINS_HOME bind-mount at /tmp/cgjenkins-home (needs sudo)
 #   - cosign keys (under /tmp/cgjenkins-home/.secrets/, wiped with cgjenkins-home)
-#   - .secrets/, harbor/.pull-token, IDENTITY file, terraform state files
+#   - .secrets/, IDENTITY file, terraform state files, captured k8s JWKS
 #
 # Leaves .env in place (so re-running setup.sh remembers your CHAINGUARD_ORG
 # choice). Pass --wipe-env to remove that too.
@@ -27,12 +27,13 @@ done
 
 cat <<EOF
 This will:
-  1. Tear down the Harbor kind cluster (if running).
+  1. Tear down the shared mirrors kind cluster (if running).
   2. Run \`terraform destroy\` in iac/ (releases the Chainguard assumed identity, if any).
   3. Stop and remove the Jenkins controller container.
   4. Remove /tmp/cgjenkins-home (needs sudo).
-  5. Remove .secrets/, harbor/.pull-token, shared-libraries/cg-images/IDENTITY,
-     and the local Terraform state files in iac/ and harbor/terraform/.
+  5. Remove .secrets/, shared-libraries/cg-images/IDENTITY, the captured
+     kind-cluster JWKS, and the local Terraform state files in iac/,
+     mirrors/_common/terraform/, and mirrors/harbor/terraform/.
 $( [[ "$WIPE_ENV" == "true" ]] && echo "  6. Remove .env." )
 EOF
 echo
@@ -42,49 +43,40 @@ read -rp "Continue? [y/N]: " ans
 # Source .env if present (for ORG / settings that affect cleanup).
 [[ -f .env ]] && { set -a; source .env; set +a; } || true
 
-echo "==> Tearing down Harbor (kind cluster, if any)..."
-if [[ -x harbor/teardown.sh ]]; then
-  harbor/teardown.sh
+echo "==> 1/5 Tearing down shared mirrors kind cluster (if any)..."
+# The kind cluster is shared across all mirror tools (jenkins-mirrors).
+# Any of the per-mirror teardown.sh scripts can delete it — they all
+# target the same cluster name. We invoke whichever exists; harbor's is
+# the canonical fallback.
+TORE_DOWN=false
+for tool in "${MIRROR_TOOL:-}" harbor distribution zot nexus-ce jcr; do
+  if [[ -n "$tool" && -x "mirrors/$tool/teardown.sh" ]]; then
+    "mirrors/$tool/teardown.sh"
+    TORE_DOWN=true
+    break
+  fi
+done
+if [[ "$TORE_DOWN" == "false" ]]; then
+  # Last resort: delete the cluster directly.
+  command -v kind >/dev/null 2>&1 && kind delete cluster --name "${KIND_CLUSTER_NAME:-jenkins-mirrors}" 2>&1 || true
 fi
 
-echo "==> Releasing Chainguard assumed identity (if Terraform state present)..."
-TF_DESTROY_FAILED=0
+echo "==> 2/5 Releasing Chainguard assumed identity (if Terraform state present)..."
 if [[ -f iac/terraform.tfstate ]]; then
   if [[ -z "${CHAINGUARD_ORG:-}" ]]; then
     echo "    SKIPPING: CHAINGUARD_ORG not set in .env, can't run terraform destroy."
     echo "    The identity will linger; clean it up manually with chainctl iam identities delete."
-    TF_DESTROY_FAILED=1
   else
-    # Don't abort the whole teardown if destroy fails — the remaining steps
-    # (stopping Jenkins, wiping /tmp/cgjenkins-home, removing local state)
-    # are still worth doing. But we DO surface the failure so the user knows
-    # to clean up the assumed identity manually, and we exit non-zero at the
-    # end so CI / scripted callers see it.
-    if ! ( cd iac && terraform destroy -auto-approve \
+    ( cd iac && terraform destroy -auto-approve \
         -var="chainguard_group_name=${CHAINGUARD_ORG}" \
-        -var="jenkins_issuer_url=${JENKINS_OIDC_ISSUER:-https://localhost:8080/oidc}" ); then
-      TF_DESTROY_FAILED=1
-      echo "    WARNING: terraform destroy failed. The Chainguard assumed identity may still exist." >&2
-      echo "    Inspect with: chainctl iam identities list --parent='${CHAINGUARD_ORG}'" >&2
-      echo "    Delete manually with: chainctl iam identities delete <id>" >&2
-    fi
+        -var="jenkins_issuer_url=${JENKINS_OIDC_ISSUER:-https://localhost:8080/oidc}" || true )
   fi
 fi
 
-echo "==> Stopping Jenkins (docker compose down)..."
-# Print full output; truncating with `tail -5` hides earlier errors that
-# would explain why compose-down failed. Capture failure so we can still
-# clean up local state (the bind-mount and generated files), and surface
-# it at the end via the exit code — set -e on its own would abort here
-# and leave /tmp/cgjenkins-home + .secrets behind.
-COMPOSE_DOWN_FAILED=0
-docker compose down --rmi local --remove-orphans || COMPOSE_DOWN_FAILED=1
-if (( COMPOSE_DOWN_FAILED == 1 )); then
-  echo "    WARNING: docker compose down failed. Continuing with local-state cleanup;" >&2
-  echo "    re-run \`docker compose down --rmi local --remove-orphans\` after fixing the daemon." >&2
-fi
+echo "==> 3/5 Stopping Jenkins (docker compose down)..."
+docker compose down --rmi local --remove-orphans 2>&1 | tail -5
 
-echo "==> Removing /tmp/cgjenkins-home..."
+echo "==> 4/5 Removing /tmp/cgjenkins-home..."
 # On macOS + OrbStack the bind-mount is owned by the host user (no sudo).
 # On Linux it may be owned by uid 1000 from inside the container, which maps
 # to a different host user — fall back to sudo only when plain rm fails.
@@ -93,25 +85,17 @@ if ! rm -rf /tmp/cgjenkins-home 2>/dev/null; then
   sudo rm -rf /tmp/cgjenkins-home
 fi
 
-echo "==> Cleaning generated files..."
+echo "==> 5/5 Cleaning generated files..."
 rm -rf .secrets
-rm -f  harbor/.pull-token
 rm -f  shared-libraries/cg-images/IDENTITY
-# Only wipe the iac/ Terraform state when destroy actually succeeded.
-# Preserving it on failure (or when destroy was skipped because
-# CHAINGUARD_ORG wasn't set) lets the user re-run ./teardown.sh after
-# fixing the cause and still have Terraform clean up the assumed identity
-# — without the state file there's no handle on the remote resource and
-# the identity gets orphaned. Harbor terraform state is independent (the
-# kind cluster gets blown away wholesale by harbor/teardown.sh), so we
-# clean it unconditionally.
-if (( TF_DESTROY_FAILED == 0 )); then
-  rm -rf iac/.terraform iac/.terraform.lock.hcl iac/terraform.tfstate iac/terraform.tfstate.backup iac/jenkins-jwks.json
-else
-  echo "    Preserving iac/terraform.tfstate (and .terraform.lock.hcl) so a future ./teardown.sh can retry the destroy."
-fi
-rm -rf harbor/terraform/.terraform harbor/terraform/.terraform.lock.hcl harbor/terraform/terraform.tfstate harbor/terraform/terraform.tfstate.backup harbor/terraform/terraform.tfvars
-rm -f  harbor/cg/helm/values.yaml harbor/cg/manifests/deploy-ingress-nginx.yaml
+rm -rf iac/.terraform iac/terraform.tfstate iac/terraform.tfstate.backup iac/jenkins-jwks.json
+# Stage 1 (shared chainguard_identity + rolebinding) state lives under
+# mirrors/_common/terraform/. The captured kind JWKS sits next to it.
+rm -rf mirrors/_common/terraform/.terraform mirrors/_common/terraform/terraform.tfstate mirrors/_common/terraform/terraform.tfstate.backup mirrors/_common/terraform/terraform.tfvars mirrors/_common/terraform/k8s-jwks.json mirrors/_common/terraform/.terraform.lock.hcl
+# Stage 2 (Harbor-specific harbor_registry + harbor_project) state lives
+# under mirrors/harbor/terraform/. No tfvars here — stage 2 takes no inputs.
+rm -rf mirrors/harbor/terraform/.terraform mirrors/harbor/terraform/terraform.tfstate mirrors/harbor/terraform/terraform.tfstate.backup mirrors/harbor/terraform/.terraform.lock.hcl
+rm -f  mirrors/harbor/cg/helm/values.yaml mirrors/harbor/cg/manifests/deploy-ingress-nginx.yaml
 
 if [[ "$WIPE_ENV" == "true" ]]; then
   rm -f .env
@@ -119,9 +103,4 @@ if [[ "$WIPE_ENV" == "true" ]]; then
 fi
 
 echo
-if (( TF_DESTROY_FAILED == 1 || COMPOSE_DOWN_FAILED == 1 )); then
-  echo "==> Done — WITH WARNINGS (terraform destroy and/or docker compose down failed/skipped; see above)." >&2
-  echo "    Re-run ./setup.sh to bootstrap from scratch."
-  exit 1
-fi
 echo "==> Done. Re-run ./setup.sh to bootstrap from scratch."

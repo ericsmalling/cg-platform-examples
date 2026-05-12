@@ -1,0 +1,12 @@
+# Terraform local state and provider plugin cache (stage-1 shared module:
+# chainguard_identity + rolebinding shared by all OCI mirror tools).
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/terraform.tfvars
+
+# Cluster JWKS captured at deploy time (kind-cluster-specific keys; uploaded
+# inline as the Chainguard identity's issuer_keys, no need to commit).
+terraform/k8s-jwks.json

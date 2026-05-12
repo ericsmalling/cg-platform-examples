@@ -23,26 +23,27 @@ services:
       # Surface the configured org to pipelines (Jenkinsfiles read env.CHAINGUARD_ORG)
       # and to JCasC (jenkins.yaml interpolates ${CHAINGUARD_ORG}).
       CHAINGUARD_ORG: ${CHAINGUARD_ORG:?CHAINGUARD_ORG must be set in .env (run ./setup.sh to be prompted)}
-      # Registry routing — set by setup.sh based on the user's mode choice:
-      #   PULL_REGISTRY  cgr.dev/<org>  (Mode A)  or  localhost/cgr-proxy/<org> (Modes B/C)
-      #   PUSH_REGISTRY  ttl.sh/<prefix> (Modes A/B)  or  localhost/library    (Mode C)
-      #   HARBOR_ENABLED true|false      (drives whether the cgLogin OIDC dance runs)
+      # Registry routing — set by setup.sh based on the user's mode choice.
+      # cgLogin.groovy reads MIRROR_TOOL to pick its auth branch; cgImage /
+      # Jenkinsfiles read PULL_REGISTRY and PUSH_REGISTRY; HARBOR_ENABLED is
+      # the legacy flag kept for backward compat with older .env files.
+      MIRROR_TOOL: ${MIRROR_TOOL:-none}
       PULL_REGISTRY: ${PULL_REGISTRY:-cgr.dev/${CHAINGUARD_ORG}}
       PUSH_REGISTRY: ${PUSH_REGISTRY:-ttl.sh/smalls}
+      PUSH_AUTH: ${PUSH_AUTH:-none}
       HARBOR_ENABLED: ${HARBOR_ENABLED:-false}
-      # Harbor admin password — surfaced to pipelines via JCasC so cgLogin's
-      # Mode C path doesn't have to hardcode the chart default in source.
-      # setup.sh persists this in .env when Harbor is enabled; deploy.sh and
-      # the harbor Terraform provider read the same value from there. Empty
-      # when Harbor isn't in use — cgLogin only reads it on the Mode C path.
-      HARBOR_ADMIN_PASSWORD: ${HARBOR_ADMIN_PASSWORD:-}
-      # NOTE: the cosign signing-key passphrase used to live here as
-      # COSIGN_PASSWORD. JCasC now reads it directly off the bind-mounted
-      # file at boot via `${readFile:/tmp/cgjenkins-home/.secrets/cosign.password}`,
-      # so it never sits in the long-lived controller env (where it would
-      # show up in `docker inspect` and could leak into build logs).
+      # Cosign signing-key passphrase. setup.sh exports this from
+      # /tmp/cgjenkins-home/.secrets/cosign.password before bringing Jenkins
+      # up; JCasC interpolates it into the `cosign-password` credential at
+      # boot. Empty if setup.sh hasn't been run yet — Jenkins still boots,
+      # but pipelines that call cgSign() will fail with a clear "credential
+      # not found" error.
+      COSIGN_PASSWORD: ${COSIGN_PASSWORD:-}
       JENKINS_HOME: /tmp/cgjenkins-home
       CASC_JENKINS_CONFIG: /tmp/cgjenkins-home/casc
+      # Override by exporting JENKINS_ADMIN_PASSWORD in your shell or
+      # adding it to .env before `docker compose up`. JCasC has the same
+      # `admin` default, so leaving this unset on the host still works.
       JENKINS_ADMIN_PASSWORD: ${JENKINS_ADMIN_PASSWORD:-admin}
       # The docker CLI's config dir. Each pipeline's Auth stage runs
       # `chainctl auth configure-docker` which writes a fresh, short-lived

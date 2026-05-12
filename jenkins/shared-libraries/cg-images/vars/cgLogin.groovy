@@ -1,24 +1,27 @@
 // vars/cgLogin.groovy
 //
 // Sets up the controller's docker config so the rest of the pipeline can
-// pull (and optionally push) Chainguard images. Behavior depends on the
-// mode chosen at setup.sh time:
+// pull (and optionally push) Chainguard images. Behavior depends on which
+// mirror tool was picked at setup.sh time, via env.MIRROR_TOOL:
 //
-//   Mode A (HARBOR_ENABLED=false, PUSH_REGISTRY=ttl.sh/...):
-//     Exchanges a per-build Jenkins-issued OIDC token for a short-lived
-//     Chainguard session via `chainctl auth login` + `chainctl auth
-//     configure-docker`. ttl.sh pushes don't need creds.
+//   none — direct cgr.dev with Jenkins OIDC chainctl per build.
+//          Exchanges the Jenkins-issued OIDC token for a short-lived
+//          Chainguard session via `chainctl auth login` + `chainctl auth
+//          configure-docker`. Push targets like ttl.sh don't need creds.
 //
-//   Mode B (HARBOR_ENABLED=true, PUSH_REGISTRY=ttl.sh/...):
-//     Pulls go through Harbor's anonymous proxy cache project, so no
-//     cgr.dev creds needed. ttl.sh pushes don't need creds either. The
-//     Auth stage is effectively a no-op — we just print a status line.
+//   harbor — Harbor as pull-through proxy. Pulls go anonymously through
+//          Harbor's public cgr-proxy project. Pushes either go to ttl.sh
+//          (Mode B; no creds) or to Harbor's library project (Mode C;
+//          admin/Harbor12345).
 //
-//   Mode C (HARBOR_ENABLED=true, PUSH_REGISTRY=localhost/...):
-//     Same as Mode B for pulls. For pushes, write Harbor admin creds
-//     (password from $HARBOR_ADMIN_PASSWORD — defaults to the chart's
-//     "Harbor12345") into DOCKER_CONFIG/config.json so docker push to
-//     localhost/... works.
+//   distribution / zot — both run anonymously: pulls and pushes need no
+//          credentials. The Auth stage is effectively a status print.
+//
+//   nexus-ce / jcr — pulls through the tool's group repo (anonymous);
+//          pushes use admin/admin (the bootstrap script writes that
+//          password to /tmp/cgjenkins-home/.secrets/<tool>/admin.password
+//          which we read into DOCKER_CONFIG/config.json keyed on the
+//          host:port the pipelines push to).
 //
 // Usage — call from a stage on `agent any` (the controller) BEFORE any
 // stage that uses `agent { docker { image cgImage(...).build } }`:
@@ -29,96 +32,148 @@
 //   }
 
 def call() {
-  def harborEnabled = (env.HARBOR_ENABLED ?: 'false') == 'true'
-  def pushRegistry  = env.PUSH_REGISTRY ?: ''
+  // Backward compat: if .env predates MIRROR_TOOL, derive it from
+  // HARBOR_ENABLED=true|false.
+  def mirrorTool = env.MIRROR_TOOL ?: ((env.HARBOR_ENABLED ?: 'false') == 'true' ? 'harbor' : 'none')
+  def pushAuth   = env.PUSH_AUTH ?: 'none'
+  def pushRegistry = env.PUSH_REGISTRY ?: ''
 
-  if (harborEnabled) {
-    if (pushRegistry.startsWith('localhost/')) {
-      // Mode C: write Harbor admin creds for push.
-      // Two entries with the same auth: cosign's reference parser rejects
-      // bare 'localhost' (treats it as a Docker Hub path), so cgSign rewrites
-      // refs to 'localhost:80/...' before invoking cosign — which then looks
-      // up auth keyed by 'localhost:80'. Docker push uses the bare 'localhost'
-      // key. Keep both so both code paths find creds.
-      //
-      // The Harbor admin password comes from the HARBOR_ADMIN_PASSWORD env
-      // var (set by JCasC globalNodeProperties → docker-compose → .env). It
-      // defaults to "Harbor12345" — the chart's own default — when setup.sh
-      // hasn't seen a user override. Reading from env (rather than hardcoding
-      // the literal) keeps cgLogin in sync with the Helm chart and the
-      // Terraform provider, both of which read the same value.
-      if (!env.HARBOR_ADMIN_PASSWORD) error('cgLogin: env.HARBOR_ADMIN_PASSWORD is empty — JCasC should set it from the controller env in Mode C (see docker-compose.yml + .env). Re-run setup.sh.')
+  switch (mirrorTool) {
+    case 'none':
+      cgLoginOidc()
+      return
+
+    case 'harbor':
+      if (pushRegistry.startsWith('localhost/')) {
+        // Mode C: write Harbor admin creds for push.
+        cgLoginBasicAuth('admin', 'Harbor12345', ['localhost', 'localhost:80'])
+      } else {
+        sh 'echo "cgLogin: Harbor mode, anonymous pulls + external push (no docker login needed)."'
+      }
+      return
+
+    case 'distribution':
+    case 'zot':
+      sh "echo \"cgLogin: ${mirrorTool} mode, anonymous pulls + anonymous pushes — no docker login needed.\""
+      return
+
+    case 'nexus-ce':
+      // Nexus CE doesn't support writable group repos, so pulls and
+      // pushes hit two different host:ports. Write the same admin auth
+      // keyed on both so docker pulls (PULL_REGISTRY host) and pushes
+      // (PUSH_REGISTRY host) both work.
+      def pullHost = (env.PULL_REGISTRY ?: '').split('/')[0]
+      def pushHost = (env.PUSH_REGISTRY ?: '').split('/')[0]
+      def hosts = [pushHost]
+      if (pullHost && pullHost != pushHost) { hosts.add(pullHost) }
+      cgLoginToolAdmin('nexus-ce', hosts)
+      return
+
+    case 'jcr':
+      def pushHostJcr = (env.PUSH_REGISTRY ?: '').split('/')[0]
+      cgLoginToolAdmin('jcr', [pushHostJcr])
+      return
+
+    default:
+      error("cgLogin: unknown MIRROR_TOOL '${mirrorTool}'")
+  }
+}
+
+// Mode A: per-build OIDC chainctl session.
+private def cgLoginOidc() {
+  def identity = readFile('/tmp/cgjenkins-home/shared-libraries/cg-images/IDENTITY').trim()
+  if (!identity) {
+    error('cgLogin: shared-libraries/cg-images/IDENTITY is empty — run setup.sh first (or pick a mirror tool).')
+  }
+  // Pass identity via the env (not Groovy ${...} interpolated into a
+  // single-quoted shell string) so a UIDP containing a quote or other
+  // shell metacharacter can't escape the script. sh body is a single-
+  // quoted Groovy string; ${...} below is pure shell.
+  withCredentials([string(credentialsId: 'jenkins-cgr-oidc', variable: 'OIDC_TOKEN')]) {
+    withEnv(["CGLOGIN_IDENTITY=${identity}"]) {
       sh '''
         set -eu
-        mkdir -p "$DOCKER_CONFIG"
-        # Pipe through `tr -d \\n` so the base64 output is a single line
-        # even when GNU coreutils wraps at 76 chars (or appends a trailing
-        # newline that survives an internal wrap). $(...) already trims the
-        # final trailing newline but not internal ones, so this is a
-        # defensive guard for any future longer auth string. Pass the
-        # password via env (not interpolated into the script body) so a
-        # passphrase containing shell metacharacters round-trips cleanly.
-        # NB: Groovy single-quoted (incl. triple-quoted) strings DO process
-        # backslash escapes — so `'\\n'` here becomes literal `'\\n'` in the
-        # rendered shell script (where tr then interprets it as newline).
-        AUTH=$(printf '%s' "admin:$HARBOR_ADMIN_PASSWORD" | base64 | tr -d '\\n')
-        cat > "$DOCKER_CONFIG/config.json" <<EOF
+        chainctl auth login --identity="$CGLOGIN_IDENTITY" --identity-token="$OIDC_TOKEN"
+        chainctl auth configure-docker --identity="$CGLOGIN_IDENTITY" --identity-token="$OIDC_TOKEN"
+        echo "cgLogin: authenticated as identity $CGLOGIN_IDENTITY (Mode A)."
+      '''
+    }
+  }
+}
+
+// Write a single basic-auth credential into DOCKER_CONFIG/config.json
+// keyed on every host string in `keys`. Used by Harbor (admin/Harbor12345
+// keyed on bare 'localhost' for docker push and 'localhost:80' for cosign,
+// whose reference parser rejects bare 'localhost').
+private def cgLoginBasicAuth(String user, String pass, List<String> keys) {
+  // `authsList` and the "wrote basic-auth for ..." message are Groovy-side
+  // strings we control here (keys are passed by the caller and are short
+  // hostnames). user/pass are also caller-controlled here, but pass via
+  // env to avoid Groovy ${...} interpolating user-controlled bytes into a
+  // single-quoted shell string. The sh body is a single-quoted Groovy
+  // string; ${authsList} is interpolated by Groovy via a Groovy-controlled
+  // string-concat below.
+  def authsList = keys.collect { '"' + it + '": { "auth": "$AUTH" }' }.join(',\n    ')
+  def script = '''
+    set -eu
+    mkdir -p "$DOCKER_CONFIG"
+    AUTH=$(printf '%s:%s' "$CGLOGIN_USER" "$CGLOGIN_PASS" | base64)
+    cat > "$DOCKER_CONFIG/config.json" <<EOF
 {
   "auths": {
-    "localhost":    { "auth": "$AUTH" },
-    "localhost:80": { "auth": "$AUTH" }
+    ''' + authsList + '''
   }
 }
 EOF
-        echo "cgLogin: configured Harbor admin auth for localhost / localhost:80 (Mode C)."
-      '''
-    } else {
-      // Mode B: anonymous everywhere, no creds to write. We still mkdir
-      // $DOCKER_CONFIG eagerly so it exists with uid-1000 ownership before
-      // cgSign/cgVerify bind-mount it into a sibling cosign container — if
-      // the dir doesn't exist when `docker run -v "$DOCKER_CONFIG":...` runs,
-      // the host docker daemon auto-creates it as root, and a later switch
-      // to Mode A would then fail when chainctl (uid 1000 inside the
-      // controller) tries to write a fresh docker config there.
-      //
-      // PUSH_REGISTRY is typically ttl.sh/<prefix> but setup.sh accepts any
-      // non-localhost value, so log the actual target rather than hardcoding
-      // ttl.sh. Pass pushRegistry through the sh-step environment rather
-      // than interpolating into the script body — defends against shell
-      // metacharacters in a user-supplied PUSH_REGISTRY value.
-      withEnv(["PUSH_DISPLAY=${pushRegistry ?: '(unset)'}"]) {
-        sh '''
-          set -eu
-          mkdir -p "$DOCKER_CONFIG"
-          echo "cgLogin: Harbor mode, anonymous pulls + pushes to $PUSH_DISPLAY (Mode B)."
-        '''
-      }
-    }
-    return
+    echo "cgLogin: wrote basic-auth for ''' + keys.join(', ') + '''."
+  '''
+  withEnv(["CGLOGIN_USER=${user}", "CGLOGIN_PASS=${pass}"]) {
+    sh script
   }
+}
 
-  // Mode A: OIDC chainctl flow.
-  // Guard the readFile with fileExists so a missing IDENTITY file (e.g.
-  // pipeline run before setup.sh, or the shared-libraries bind mount not
-  // present) surfaces a clear, actionable error instead of a low-level
-  // Groovy exception from the readFile step.
-  def identityFile = '/tmp/cgjenkins-home/shared-libraries/cg-images/IDENTITY'
-  if (!fileExists(identityFile)) {
-    error('cgLogin: ' + identityFile + ' is missing — run setup.sh first (or set HARBOR_ENABLED=true to use the Harbor proxy cache).')
+// For Nexus CE and JCR: read the admin password the bootstrap script
+// persisted to /tmp/cgjenkins-home/.secrets/<tool>/admin.password, then
+// write a docker config keyed on every host:port the pipeline talks to
+// (some tools split pull and push across separate ports).
+private def cgLoginToolAdmin(String tool, List<String> hostPorts) {
+  hostPorts = hostPorts.findAll { it && it.length() > 0 }.unique()
+  if (hostPorts.isEmpty()) {
+    error("cgLogin: no host:port resolved for ${tool}.")
   }
-  def identity = readFile(identityFile).trim()
-  if (!identity) {
-    error('cgLogin: ' + identityFile + ' is empty — run setup.sh first (or set HARBOR_ENABLED=true to use the Harbor proxy cache).')
+  // Validate `tool` against a fixed allowlist before letting it through
+  // — it composes a filesystem path below, and we'd rather fail loudly
+  // than risk a poisoned value escaping the path.
+  if (!(tool in ['nexus-ce', 'jcr'])) {
+    error("cgLogin: cgLoginToolAdmin called with unsupported tool '${tool}'")
   }
-  withCredentials([string(credentialsId: 'jenkins-cgr-oidc', variable: 'OIDC_TOKEN')]) {
-    sh """
-      set -eu
-      chainctl auth login --identity='${identity}' --identity-token=\"\$OIDC_TOKEN\"
-      # configure-docker needs --identity and --identity-token too, otherwise
-      # it falls through to the interactive browser flow after writing the
-      # credential helper config.
-      chainctl auth configure-docker --identity='${identity}' --identity-token=\"\$OIDC_TOKEN\"
-      echo 'cgLogin: authenticated as identity ${identity} (Mode A).'
-    """
+  // authsList is Groovy-controlled (the JSON skeleton) but each host is
+  // caller-controlled. JSON encode minimally — barring a `"` in a hostname
+  // (which docker rejects anyway), the surrounding double quotes are
+  // enough. The shell body is single-quoted Groovy, so $TOOL et al. below
+  // are pure shell.
+  def authsList = hostPorts.collect { '"' + it + '": { "auth": "$AUTH" }' }.join(',\n    ')
+  def hostsForEcho = hostPorts.join(', ')
+  def script = '''
+    set -eu
+    PW_FILE="/tmp/cgjenkins-home/.secrets/$CGLOGIN_TOOL/admin.password"
+    if [ ! -f "$PW_FILE" ]; then
+      echo "cgLogin: $CGLOGIN_TOOL admin password file not found at $PW_FILE — bootstrap may have failed." >&2
+      exit 1
+    fi
+    PASS=$(cat "$PW_FILE")
+    mkdir -p "$DOCKER_CONFIG"
+    AUTH=$(printf 'admin:%s' "$PASS" | base64)
+    cat > "$DOCKER_CONFIG/config.json" <<EOF
+{
+  "auths": {
+    ''' + authsList + '''
+  }
+}
+EOF
+    echo "cgLogin: wrote admin auth for ''' + hostsForEcho + ''' ($CGLOGIN_TOOL)."
+  '''
+  withEnv(["CGLOGIN_TOOL=${tool}"]) {
+    sh script
   }
 }

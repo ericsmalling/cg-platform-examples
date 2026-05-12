@@ -11,12 +11,10 @@ All Jenkins infrastructure and all build/test/runtime images come from `cgr.dev/
 | [`corretto-java17-maven`](apps/corretto-java17-maven/)   | Spring Boot console app, Maven  | `maven:3-jdk17-dev`     | `amazon-corretto-jre:17`    | runnable JAR (Jenkins archive) |
 | [`adoptium-java8-jetty`](apps/adoptium-java8-jetty/)     | JSP web app, Maven, Jetty 9.4   | `maven:3-jdk8-dev`      | `adoptium-jre:adoptium-openjdk-8` | runnable WAR (Jenkins archive) |
 | [`openjdk21-gradle`](apps/openjdk21-gradle/)             | CLI app, Gradle 8.14            | `jdk:openjdk-21-dev`    | `jre:openjdk-21`            | runnable JAR (Jenkins archive) |
-| [`python314-uv-flask`](apps/python314-uv-flask/)         | Flask web app, `uv`             | `python:3.14-dev`       | `python:3.14`               | OCI image → `$PUSH_REGISTRY/pytest:3-14` |
-| [`python312-pip-django`](apps/python312-pip-django/)     | Django site, `pip`              | `python:3.12-dev`       | `python:3.12`               | OCI image → `$PUSH_REGISTRY/pytest:3-12` |
-| [`node22-npm-express`](apps/node22-npm-express/)         | Express web app, `npm`          | `node:22-dev`           | `node:22`                   | OCI image → `$PUSH_REGISTRY/nodetest:22` |
-| [`node25-pnpm-express`](apps/node25-pnpm-express/)       | Express web app, `pnpm`         | `node:25-dev`           | `node:25-slim`              | OCI image → `$PUSH_REGISTRY/nodetest:25` |
-
-> `$PUSH_REGISTRY` is set by `setup.sh` (and persisted in `.env`) — typically a `ttl.sh/<your-prefix>` for the public ttl.sh mode, or `localhost/library` when pushing to the optional Harbor mirror in Mode C.
+| [`python314-uv-flask`](apps/python314-uv-flask/)         | Flask web app, `uv`             | `python:3.14-dev`       | `python:3.14`               | OCI image → `ttl.sh/smalls-pytest:3-14` |
+| [`python312-pip-django`](apps/python312-pip-django/)     | Django site, `pip`              | `python:3.12-dev`       | `python:3.12`               | OCI image → `ttl.sh/smalls-pytest:3-12` |
+| [`node22-npm-express`](apps/node22-npm-express/)         | Express web app, `npm`          | `node:22-dev`           | `node:22`                   | OCI image → `ttl.sh/smalls-nodetest:22` |
+| [`node25-pnpm-express`](apps/node25-pnpm-express/)       | Express web app, `pnpm`         | `node:25-dev`           | `node:25-slim`              | OCI image → `ttl.sh/smalls-nodetest:25` |
 
 (Java pipelines archive their build artifact directly into Jenkins. Python/Node pipelines build an OCI image and push it to [ttl.sh](https://ttl.sh/) — an anonymous-push registry where tags expire after 24h. Re-run a pipeline to refresh.)
 
@@ -98,7 +96,7 @@ The script asks three questions, lays out the chosen mode in `.env`, builds & st
 
 > **Mode A caveat:** the `oidc-provider` plugin regenerates its RSA signing key on JCasC re-apply, which invalidates the JWKS uploaded to Chainguard. **Re-run setup.sh after any restart of the Jenkins controller** (`docker compose restart`, `down`/`up`, or `--force-recreate`). Modes B/C aren't affected by this since they don't use OIDC.
 
-Open <http://localhost:8080> (`admin` / `admin`; override the password via `JENKINS_ADMIN_PASSWORD` in [docker-compose.yml](docker-compose.yml)). You should see all seven sample jobs plus the `refresh-cgimages-digests` ops job. Click any sample → **Build Now**. Each pipeline runs roughly the same shape:
+Open <http://localhost:8080> (`admin` / `admin`; override the password by exporting `JENKINS_ADMIN_PASSWORD` in your shell — or adding it to `.env` — before `docker compose up`). You should see all seven sample jobs plus the `refresh-cgimages-digests` ops job. Click any sample → **Build Now**. Each pipeline runs roughly the same shape:
 
 1. **Auth** — `cgLogin()` (a shared-library var) handles auth for whichever mode is active: Mode A runs the OIDC chainctl exchange; Mode B is a no-op (anonymous pulls); Mode C writes Harbor admin creds for push.
 2. **Checkout** — `cp -R /sources/apps/<name>/. .` from the bind-mounted source dir into the build workspace.
@@ -114,15 +112,7 @@ A clean build takes 10s–40s once images are cached locally; the Gradle pipelin
 The public key sits at `/tmp/cgjenkins-home/.secrets/cosign.pub`. To check a pushed image from outside Jenkins, run cosign in a host-network container so `localhost` resolves to your ingress:
 
 ```sh
-# Pick the RepoDigest whose repo matches the image you just pulled. A
-# single image can have multiple RepoDigests in the local cache (one per
-# registry/org it has been pushed to), and `{{index .RepoDigests 0}}`
-# returns whichever happens to be first — which may not match the repo
-# you want to verify. Filter by the repo prefix to be safe. cgSign and
-# cgVerify use the same pattern internally.
-IMAGE=localhost/library/pytest:3-14
-REPO="${IMAGE%:*}"
-DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" | grep -F "${REPO}@" | head -1)
+DIGEST=$(docker image inspect --format '{{index .RepoDigests 0}}' localhost/library/pytest:3-14)
 # cosign's reference parser rejects bare 'localhost' (it tries Docker Hub),
 # so rewrite to 'localhost:80' before passing to cosign:
 DIGEST="${DIGEST/#localhost\//localhost:80/}"
@@ -160,7 +150,7 @@ These bit me while building out the seven samples — useful to know up front wh
   - **Gradle**: `environment { GRADLE_USER_HOME = "${WORKSPACE}/.gradle" }`
   - **npm / pnpm**: `environment { HOME = "${WORKSPACE}" }`
 - **Chainguard's `python:3.x-dev` runs as uid 65532**, which can't write to the system site-packages. For pipelines that want to `pip install --system` or `uv pip install --system`, pass `args '--user 0 --entrypoint='` in the Jenkinsfile **and** add `USER 0` to the corresponding stage in the Dockerfile.
-- **OCI-image pipelines push to whatever `$PUSH_REGISTRY` resolves to**: `ttl.sh/<prefix>` in Modes A/B (anonymous, 24h TTL) or `localhost/library` in Mode C (Harbor admin auth supplied by `cgLogin`, sourced from `$HARBOR_ADMIN_PASSWORD` — defaults to the chart's `Harbor12345`, overridable in `.env`). Per-app `IMAGE` envs use `${env.PUSH_REGISTRY}/<app-name>:<tag>` — works for both ttl.sh and Harbor without per-mode pipeline edits.
+- **OCI-image pipelines push to whatever `$PUSH_REGISTRY` resolves to**: `ttl.sh/<prefix>` in Modes A/B (anonymous, 24h TTL) or `localhost/library` in Mode C (Harbor admin/Harbor12345 baked in by `cgLogin`). Per-app `IMAGE` envs use `${env.PUSH_REGISTRY}/<app-name>:<tag>` — works for both ttl.sh and Harbor without per-mode pipeline edits.
 - **The Auth stage must precede any `agent { docker { image '...' } }` stage**, because the docker-workflow plugin pulls the agent's image using whatever creds are in `$DOCKER_CONFIG` *at the start of that stage*. The current pipeline shape (`Auth` → `Checkout` → docker-agent stages) gets the ordering right; preserve it when adding new pipelines.
 
 ## Teardown
@@ -185,3 +175,4 @@ rm -rf .secrets harbor/.pull-token shared-libraries/cg-images/IDENTITY
 ## Notes
 
 - The DooD pattern means Jenkins effectively has root-equivalent access to the host machine via the Docker socket. This is acceptable for a local demo but not for production.
+- See [PLAN.md](PLAN.md) for the original sample-app spec.

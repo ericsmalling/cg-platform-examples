@@ -5,7 +5,6 @@ container. Run `python app.py` to serve on 0.0.0.0:8080 (Django's runserver).
 import os
 import platform
 import sys
-import django
 from django.conf import settings
 from django.core.management import execute_from_command_line
 from django.http import HttpResponse
@@ -13,41 +12,18 @@ from django.urls import path
 
 settings.configure(
     DEBUG=False,
-    # Demo-only fallback. In any non-demo deployment, set DJANGO_SECRET_KEY
-    # in the environment — Django's signed cookies, password reset tokens,
-    # and CSRF tokens all derive from this key, so a static value defeats
-    # those protections.
-    SECRET_KEY=os.environ.get("DJANGO_SECRET_KEY", "demo-not-secret"),
+    SECRET_KEY="demo-not-secret",
     ROOT_URLCONF=__name__,
-    # Localhost + the test client's default host ("testserver") only.
-    # ALLOWED_HOSTS=["*"] would let the container respond to any Host
-    # header — a Host-header injection risk if the image ever escaped its
-    # localhost demo context. The pipeline's smoke test uses Client().get(),
-    # which sends Host: testserver, so we include that explicitly.
-    ALLOWED_HOSTS=["localhost", "127.0.0.1", "testserver"],
+    ALLOWED_HOSTS=["*"],
     INSTALLED_APPS=["django.contrib.contenttypes", "django.contrib.auth"],
     MIDDLEWARE=[],
-    # In-memory SQLite — contrib.contenttypes and contrib.auth declare models
-    # and need a `default` DB or app loading bombs out. We never touch the DB
-    # at request time (the hello view returns a constant), so :memory: is fine.
-    DATABASES={
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": ":memory:",
-        },
-    },
+    DATABASES={},
     USE_TZ=True,
 )
 
-# Initialise the app registry. `execute_from_command_line` (runserver path)
-# calls this internally, but the Test stage imports this module directly and
-# invokes django.test.Client without going through that codepath — without an
-# explicit setup() call the app registry stays unpopulated and the test fails
-# with AppRegistryNotReady the moment contrib.auth's signals fire.
-django.setup()
-
 
 def hello(request):
+    import django
     body = (
         "<h1>Hello from Django on Chainguard</h1>"
         "<h2>Runtime info</h2>"
