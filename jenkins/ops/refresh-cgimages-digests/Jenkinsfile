@@ -27,7 +27,12 @@ pipeline {
     stage('Refresh digests') {
       agent {
         docker {
-          image "cgr.dev/${env.CHAINGUARD_ORG}/crane:latest-dev"
+          // Pull the crane agent image through the configured mirror tool
+          // when one is active. The host docker daemon (which Jenkins shares
+          // via the socket bind-mount) has no cgr.dev creds in mirror modes,
+          // so hardcoding cgr.dev here 401s. PULL_REGISTRY is always set —
+          // cgr.dev/$ORG in `none` mode, localhost/<mirror>/$ORG otherwise.
+          image "${env.PULL_REGISTRY}/crane:latest-dev"
           // The agent inherits the controller's mounts via `--volumes-from`
           // (Jenkins docker-workflow plugin default), so the shared-libraries
           // tree (rw) and the pull-token docker config are already visible at
