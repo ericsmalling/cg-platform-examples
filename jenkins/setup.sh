@@ -13,9 +13,16 @@
 #   jcr          — JFrog Container Registry (free non-commercial).
 #
 # Every mirror choice (anything but 'none') stands up a single shared kind
-# cluster with an in-cluster cgr-oidc-proxy that mints short-lived
-# Chainguard registry bearers from a projected k8s ServiceAccount JWT —
-# no long-lived pull tokens anywhere.
+# cluster, then prompts how the mirror should authenticate to cgr.dev:
+#   proxy       — in-cluster cgr-oidc-proxy mints short-lived registry
+#                 bearers from a projected ServiceAccount JWT (no long-lived
+#                 creds on disk). Stored as AUTH_MODE=proxy in .env.
+#   pull-token  — `chainctl auth pull-token create` mints a long-lived
+#                 basic-auth pair with a user-chosen TTL (default 168h);
+#                 the mirror stores it as static upstream creds. Stored as
+#                 AUTH_MODE=pull-token + PULL_TOKEN_TTL=<duration> in .env.
+# The `none` mode (direct cgr.dev) uses Jenkins OIDC per-build chainctl
+# and isn't affected.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -95,6 +102,67 @@ done
 echo "==> Selected: ${MIRROR_TOOL}"
 echo
 
+# ---- Auth mode selection -------------------------------------------------
+#
+# None of the 5 mirror tools natively support OIDC for upstream registry
+# pulls — they all only accept a static username/password pair for upstream
+# auth. So for any non-`none` mode the demo offers two ways to supply
+# Chainguard credentials to the mirror:
+#
+#   proxy       — deploy the in-cluster cgr-oidc-proxy. It holds a projected
+#                 ServiceAccount JWT, exchanges it at Chainguard's STS for a
+#                 short-lived registry bearer, and injects it on every
+#                 outbound request. No long-lived creds on disk.
+#   pull-token  — `chainctl auth pull-token create` mints a long-lived
+#                 basic-auth pair (Chainguard identity_id + JWT) with a
+#                 user-chosen TTL. The mirror tool stores this as static
+#                 upstream creds. Simpler to operate, but the credential
+#                 has a fixed lifetime and lives on disk until rotated.
+#
+# `none` mode (direct cgr.dev) always uses per-build Jenkins OIDC — no proxy,
+# no pull token — so the prompt is skipped.
+
+if [[ "$MIRROR_TOOL" == "none" ]]; then
+  AUTH_MODE="oidc-direct"
+  PULL_TOKEN_TTL=""
+else
+  PRIOR_AUTH="${AUTH_MODE:-proxy}"
+  case "$PRIOR_AUTH" in
+    proxy)      DEFAULT_AUTH_NUM=1 ;;
+    pull-token) DEFAULT_AUTH_NUM=2 ;;
+    *)          DEFAULT_AUTH_NUM=1 ;;
+  esac
+  echo "==> How should the ${MIRROR_TOOL} mirror authenticate to cgr.dev?"
+  echo "    1) proxy       — in-cluster cgr-oidc-proxy (OIDC, no long-lived creds)"
+  echo "    2) pull-token  — chainctl-issued long-lived basic auth"
+  echo
+  AUTH_MODE=""
+  while [[ -z "$AUTH_MODE" ]]; do
+    read -rp "    Choose [1-2, default ${DEFAULT_AUTH_NUM}]: " ans
+    ans="${ans:-$DEFAULT_AUTH_NUM}"
+    case "$ans" in
+      1) AUTH_MODE=proxy ;;
+      2) AUTH_MODE=pull-token ;;
+      *) echo "    invalid choice: $ans" ;;
+    esac
+  done
+  echo "==> Auth mode: ${AUTH_MODE}"
+  echo
+
+  if [[ "$AUTH_MODE" == "pull-token" ]]; then
+    # TTL accepts Go-duration strings (24h, 168h, 720h, ...). chainctl auth
+    # pull-token create rejects anything else; we don't try to validate
+    # client-side beyond non-emptiness — let chainctl be the source of truth.
+    PRIOR_TTL="${PULL_TOKEN_TTL:-168h}"
+    read -rp "    Pull-token TTL [default ${PRIOR_TTL}; e.g. 24h, 168h, 720h]: " ans
+    PULL_TOKEN_TTL="${ans:-$PRIOR_TTL}"
+    echo "==> Pull-token TTL: ${PULL_TOKEN_TTL}"
+    echo
+  else
+    PULL_TOKEN_TTL=""
+  fi
+fi
+
 # Per-tool URL layout. Pipelines reference $PULL_REGISTRY and $PUSH_REGISTRY;
 # whichever tool got picked exposes those URLs on host ports defined in
 # mirrors/_common/kind/config.yaml.
@@ -168,6 +236,7 @@ if [[ "$MIRROR_TOOL" == "harbor" ]]; then HARBOR_ENABLED=true; else HARBOR_ENABL
 echo
 echo "==> Mode summary:"
 echo "    Mirror tool:   ${MIRROR_TOOL}"
+echo "    Auth mode:     ${AUTH_MODE}${PULL_TOKEN_TTL:+ (TTL: ${PULL_TOKEN_TTL})}"
 echo "    Pulls from:    ${PULL_REGISTRY}"
 echo "    Pushes to:     ${PUSH_REGISTRY}"
 echo "    Push auth:     ${PUSH_AUTH}"
@@ -318,12 +387,14 @@ update_env() {
     printf '%s=%s\n' "$key" "$value" >> .env
   fi
 }
-update_env CHAINGUARD_ORG "$ORG"
-update_env MIRROR_TOOL    "$MIRROR_TOOL"
-update_env HARBOR_ENABLED "$HARBOR_ENABLED"
-update_env PULL_REGISTRY  "$PULL_REGISTRY"
-update_env PUSH_REGISTRY  "$PUSH_REGISTRY"
-update_env PUSH_AUTH      "$PUSH_AUTH"
+update_env CHAINGUARD_ORG  "$ORG"
+update_env MIRROR_TOOL     "$MIRROR_TOOL"
+update_env HARBOR_ENABLED  "$HARBOR_ENABLED"
+update_env PULL_REGISTRY   "$PULL_REGISTRY"
+update_env PUSH_REGISTRY   "$PUSH_REGISTRY"
+update_env PUSH_AUTH       "$PUSH_AUTH"
+update_env AUTH_MODE       "$AUTH_MODE"
+update_env PULL_TOKEN_TTL  "$PULL_TOKEN_TTL"
 
 # ---- Phase 2: (re)create Jenkins ----------------------------------------
 
@@ -366,8 +437,13 @@ if [[ "$MIRROR_TOOL" == "none" ]]; then
   echo "    Created identity: ${UIDP}"
   printf '%s\n' "$UIDP" > shared-libraries/cg-images/IDENTITY
 else
-  echo "==> Deploying ${MIRROR_TOOL} mirror (kind + cgr-oidc-proxy + tool)..."
-  CHAINGUARD_ORG="$ORG" "mirrors/${MIRROR_TOOL}/deploy.sh"
+  if [[ "$AUTH_MODE" == "proxy" ]]; then
+    echo "==> Deploying ${MIRROR_TOOL} mirror (kind + cgr-oidc-proxy + tool)..."
+  else
+    echo "==> Deploying ${MIRROR_TOOL} mirror (kind + chainctl pull token + tool)..."
+  fi
+  CHAINGUARD_ORG="$ORG" AUTH_MODE="$AUTH_MODE" PULL_TOKEN_TTL="$PULL_TOKEN_TTL" \
+    "mirrors/${MIRROR_TOOL}/deploy.sh"
 
   # Mirror modes don't use the Jenkins OIDC assumed identity at runtime;
   # truncate IDENTITY so cgLogin won't try the chainctl path.

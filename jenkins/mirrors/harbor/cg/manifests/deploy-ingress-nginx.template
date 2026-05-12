@@ -510,6 +510,7 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
       serviceAccountName: ingress-nginx
+$IMAGE_PULL_SECRETS_BLOCK
       terminationGracePeriodSeconds: 0
       tolerations:
       - effect: NoSchedule
@@ -575,6 +576,7 @@ spec:
         kubernetes.io/os: linux
       restartPolicy: OnFailure
       serviceAccountName: ingress-nginx-admission
+$IMAGE_PULL_SECRETS_BLOCK
 ---
 apiVersion: batch/v1
 kind: Job
@@ -630,6 +632,7 @@ spec:
         kubernetes.io/os: linux
       restartPolicy: OnFailure
       serviceAccountName: ingress-nginx-admission
+$IMAGE_PULL_SECRETS_BLOCK
 ---
 apiVersion: networking.k8s.io/v1
 kind: IngressClass

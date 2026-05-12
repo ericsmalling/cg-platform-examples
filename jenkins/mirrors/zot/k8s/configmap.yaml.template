@@ -23,10 +23,10 @@ data:
           "enable": true,
           "registries": [
             {
-              "urls": ["http://cgr-oidc-proxy.cgr-oidc-proxy.svc.cluster.local:5000"],
+              "urls": ["${SYNC_URL}"],
               "onDemand": true,
-              "tlsVerify": false,
-              "content": [
+              "tlsVerify": ${SYNC_TLS_VERIFY},
+              ${SYNC_CREDENTIALS_FILE_BLOCK}"content": [
                 {
                   "prefix": "${CHAINGUARD_ORG}/**",
                   "stripPrefix": true

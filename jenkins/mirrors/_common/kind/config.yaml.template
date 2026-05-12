@@ -1,15 +1,16 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-# Mirror cgr.dev to the in-cluster cgr-oidc-proxy. The proxy runs with
-# hostNetwork: true on port 5000, so containerd reaches it on 127.0.0.1
-# from each node. The proxy injects a short-lived OIDC-derived bearer on
-# every outbound request to cgr.dev, replacing the old long-lived pull
-# token. Mirror is bootstrapped at cluster create time; containerd retries
-# the endpoint until the proxy Deployment becomes ready.
-containerdConfigPatches:
-  - |-
-    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."cgr.dev"]
-      endpoint = ["http://127.0.0.1:5000"]
+# AUTH_MODE-dependent containerd block (rendered by
+# common::ensure_kind_cluster in mirrors/_common/bootstrap.sh):
+#
+#   AUTH_MODE=proxy       — installs a registry mirror redirecting cgr.dev
+#                           to 127.0.0.1:5000 (cgr-oidc-proxy on hostNetwork).
+#                           The proxy injects a short-lived OIDC-derived
+#                           bearer on every outbound request. Containerd
+#                           retries until the proxy Deployment is Ready.
+#   AUTH_MODE=pull-token  — no mirror. Kubelet pulls cgr.dev directly using
+#                           regcred imagePullSecrets attached to each Pod.
+${CONTAINERD_PATCHES_BLOCK}
 nodes:
 - role: control-plane
   extraPortMappings:

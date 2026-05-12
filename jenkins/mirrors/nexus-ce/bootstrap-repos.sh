@@ -34,9 +34,27 @@ ADMIN_PASS_FILE="${SECRETS_DIR}/admin.password"
 LOCAL_PORT="${LOCAL_PORT:-18081}"
 NEXUS_BASE="http://127.0.0.1:${LOCAL_PORT}"
 
-# Upstream the in-cluster cgr-oidc-proxy Service. Nexus reaches it over plain
-# HTTP on the cluster network. The proxy injects the OIDC-derived bearer.
-CGR_PROXY_URL="${CGR_PROXY_URL:-http://cgr-oidc-proxy.cgr-oidc-proxy.svc.cluster.local:5000}"
+AUTH_MODE="${AUTH_MODE:-proxy}"
+PULL_USER="${PULL_USER:-}"
+PULL_PASS="${PULL_PASS:-}"
+CHAINGUARD_ORG="${CHAINGUARD_ORG:-}"
+
+# Upstream URL for the cgr-proxy docker proxy repo.
+#   proxy mode:      in-cluster cgr-oidc-proxy injects an OIDC-derived bearer;
+#                    Nexus talks to it anonymously over plain HTTP.
+#   pull-token mode: Nexus talks directly to cgr.dev/<org> using a long-lived
+#                    pull token configured as basic-auth on the httpClient.
+if [[ -z "${CGR_PROXY_URL:-}" ]]; then
+  if [[ "$AUTH_MODE" == "pull-token" ]]; then
+    if [[ -z "$CHAINGUARD_ORG" ]]; then
+      echo "ERROR: CHAINGUARD_ORG must be set when AUTH_MODE=pull-token" >&2
+      exit 1
+    fi
+    CGR_PROXY_URL="https://cgr.dev/${CHAINGUARD_ORG}"
+  else
+    CGR_PROXY_URL="http://cgr-oidc-proxy.cgr-oidc-proxy.svc.cluster.local:5000"
+  fi
+fi
 
 for tool in kubectl curl jq; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -212,41 +230,48 @@ realms='["DockerToken","NexusAuthenticatingRealm"]'
 nexus_put_json "/service/rest/v1/security/realms/active" "$realms"
 
 # ---- Create cgr-proxy (docker proxy) ------------------------------------
-# remoteUrl points at the in-cluster cgr-oidc-proxy. Anonymous (no upstream
-# auth) — the proxy supplies its own OIDC-derived bearer.
-echo "==> Creating docker proxy repo 'cgr-proxy'..."
-proxy_body=$(cat <<JSON
-{
-  "name": "cgr-proxy",
-  "online": true,
-  "storage": {
-    "blobStoreName": "default",
-    "strictContentTypeValidation": true
-  },
-  "proxy": {
-    "remoteUrl": "${CGR_PROXY_URL}",
-    "contentMaxAge": 1440,
-    "metadataMaxAge": 1440
-  },
-  "negativeCache": {
-    "enabled": true,
-    "timeToLive": 1440
-  },
-  "httpClient": {
-    "blocked": false,
-    "autoBlock": true
-  },
-  "docker": {
-    "v1Enabled": false,
-    "forceBasicAuth": false,
-    "httpPort": 5053
-  },
-  "dockerProxy": {
-    "indexType": "REGISTRY"
-  }
-}
-JSON
-)
+# proxy mode:      remoteUrl is the in-cluster cgr-oidc-proxy; httpClient is
+#                  anonymous (the proxy supplies its own OIDC-derived bearer).
+# pull-token mode: remoteUrl is cgr.dev/<org>; httpClient.authentication
+#                  carries the chainctl pull token as basic-auth credentials.
+echo "==> Creating docker proxy repo 'cgr-proxy' (AUTH_MODE=${AUTH_MODE})..."
+if [[ "$AUTH_MODE" == "pull-token" ]]; then
+  if [[ -z "$PULL_USER" || -z "$PULL_PASS" ]]; then
+    echo "ERROR: PULL_USER and PULL_PASS must be set when AUTH_MODE=pull-token" >&2
+    exit 1
+  fi
+  # jq safely escapes the JWT/UIDP values for embedding in JSON.
+  proxy_body="$(jq -nc \
+    --arg url   "$CGR_PROXY_URL" \
+    --arg user  "$PULL_USER" \
+    --arg pass  "$PULL_PASS" \
+    '{
+      name: "cgr-proxy",
+      online: true,
+      storage: { blobStoreName: "default", strictContentTypeValidation: true },
+      proxy:   { remoteUrl: $url, contentMaxAge: 1440, metadataMaxAge: 1440 },
+      negativeCache: { enabled: true, timeToLive: 1440 },
+      httpClient: {
+        blocked: false,
+        autoBlock: true,
+        authentication: { type: "username", username: $user, password: $pass }
+      },
+      docker:      { v1Enabled: false, forceBasicAuth: false, httpPort: 5053 },
+      dockerProxy: { indexType: "REGISTRY" }
+    }')"
+else
+  proxy_body="$(jq -nc --arg url "$CGR_PROXY_URL" \
+    '{
+      name: "cgr-proxy",
+      online: true,
+      storage: { blobStoreName: "default", strictContentTypeValidation: true },
+      proxy:   { remoteUrl: $url, contentMaxAge: 1440, metadataMaxAge: 1440 },
+      negativeCache: { enabled: true, timeToLive: 1440 },
+      httpClient:  { blocked: false, autoBlock: true },
+      docker:      { v1Enabled: false, forceBasicAuth: false, httpPort: 5053 },
+      dockerProxy: { indexType: "REGISTRY" }
+    }')"
+fi
 nexus_post_json "/service/rest/v1/repositories/docker/proxy" "$proxy_body"
 
 # ---- Create library (docker hosted) -------------------------------------

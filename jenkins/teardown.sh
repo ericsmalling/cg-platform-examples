@@ -27,14 +27,16 @@ done
 
 cat <<EOF
 This will:
-  1. Tear down the shared mirrors kind cluster (if running).
-  2. Run \`terraform destroy\` in iac/ (releases the Chainguard assumed identity, if any).
-  3. Stop and remove the Jenkins controller container.
-  4. Remove /tmp/cgjenkins-home (needs sudo).
-  5. Remove .secrets/, shared-libraries/cg-images/IDENTITY, the captured
+  1. Delete any chainctl pull tokens minted by setup.sh in pull-token mode
+     (cached under mirrors/_common/.pull-tokens/).
+  2. Tear down the shared mirrors kind cluster (if running).
+  3. Run \`terraform destroy\` in iac/ (releases the Chainguard assumed identity, if any).
+  4. Stop and remove the Jenkins controller container.
+  5. Remove /tmp/cgjenkins-home (needs sudo).
+  6. Remove .secrets/, shared-libraries/cg-images/IDENTITY, the captured
      kind-cluster JWKS, and the local Terraform state files in iac/,
      mirrors/_common/terraform/, and mirrors/harbor/terraform/.
-$( [[ "$WIPE_ENV" == "true" ]] && echo "  6. Remove .env." )
+$( [[ "$WIPE_ENV" == "true" ]] && echo "  7. Remove .env." )
 EOF
 echo
 read -rp "Continue? [y/N]: " ans
@@ -43,7 +45,41 @@ read -rp "Continue? [y/N]: " ans
 # Source .env if present (for ORG / settings that affect cleanup).
 [[ -f .env ]] && { set -a; source .env; set +a; } || true
 
-echo "==> 1/5 Tearing down shared mirrors kind cluster (if any)..."
+echo "==> 1/6 Deleting chainctl pull tokens (if any)..."
+# Pull tokens minted in AUTH_MODE=pull-token are cached under
+# mirrors/_common/.pull-tokens/<tool>.json. Each file is the full chainctl
+# JSON response, including identity_id (the Chainguard identity UIDP we
+# need to pass to `chainctl auth pull-token delete`). If chainctl isn't
+# installed or the user isn't logged in, we still remove the cache file
+# but leave the upstream token to time out on its own — and warn so the
+# user can clean it up manually.
+PULL_TOKEN_DIR="mirrors/_common/.pull-tokens"
+if compgen -G "$PULL_TOKEN_DIR/*.json" >/dev/null; then
+  if ! command -v chainctl >/dev/null 2>&1; then
+    echo "    SKIPPING delete: chainctl not in PATH. Tokens will linger until TTL expiry."
+    echo "    Cached files: $PULL_TOKEN_DIR/*.json"
+  else
+    for tf in "$PULL_TOKEN_DIR"/*.json; do
+      [[ -e "$tf" ]] || continue
+      uidp="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("identity_id",""))' "$tf" 2>/dev/null || true)"
+      name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("name",""))' "$tf" 2>/dev/null || true)"
+      if [[ -z "$uidp" ]]; then
+        echo "    WARN: $tf has no identity_id; can't delete via chainctl. Leaving it for manual cleanup."
+        continue
+      fi
+      echo "    Deleting pull token ${name:-?} ($uidp)..."
+      # chainctl auth pull-token delete takes the identity UIDP positionally;
+      # --yes suppresses the confirmation prompt. We tolerate failure (e.g.
+      # token already gone, or installed chainctl uses a different verb) so
+      # one stale entry doesn't block the rest of teardown.
+      chainctl auth pull-token delete "$uidp" --yes 2>&1 | sed 's/^/      /' || \
+        echo "      (delete failed — token may have already expired or chainctl syntax differs)"
+    done
+  fi
+  rm -rf "$PULL_TOKEN_DIR"
+fi
+
+echo "==> 2/6 Tearing down shared mirrors kind cluster (if any)..."
 # The kind cluster is shared across all mirror tools (jenkins-mirrors).
 # Any of the per-mirror teardown.sh scripts can delete it — they all
 # target the same cluster name. We invoke whichever exists; harbor's is
@@ -61,7 +97,7 @@ if [[ "$TORE_DOWN" == "false" ]]; then
   command -v kind >/dev/null 2>&1 && kind delete cluster --name "${KIND_CLUSTER_NAME:-jenkins-mirrors}" 2>&1 || true
 fi
 
-echo "==> 2/5 Releasing Chainguard assumed identity (if Terraform state present)..."
+echo "==> 3/6 Releasing Chainguard assumed identity (if Terraform state present)..."
 if [[ -f iac/terraform.tfstate ]]; then
   if [[ -z "${CHAINGUARD_ORG:-}" ]]; then
     echo "    SKIPPING: CHAINGUARD_ORG not set in .env, can't run terraform destroy."
@@ -73,10 +109,10 @@ if [[ -f iac/terraform.tfstate ]]; then
   fi
 fi
 
-echo "==> 3/5 Stopping Jenkins (docker compose down)..."
+echo "==> 4/6 Stopping Jenkins (docker compose down)..."
 docker compose down --rmi local --remove-orphans 2>&1 | tail -5
 
-echo "==> 4/5 Removing /tmp/cgjenkins-home..."
+echo "==> 5/6 Removing /tmp/cgjenkins-home..."
 # On macOS + OrbStack the bind-mount is owned by the host user (no sudo).
 # On Linux it may be owned by uid 1000 from inside the container, which maps
 # to a different host user — fall back to sudo only when plain rm fails.
@@ -85,13 +121,15 @@ if ! rm -rf /tmp/cgjenkins-home 2>/dev/null; then
   sudo rm -rf /tmp/cgjenkins-home
 fi
 
-echo "==> 5/5 Cleaning generated files..."
+echo "==> 6/6 Cleaning generated files..."
 rm -rf .secrets
 rm -f  shared-libraries/cg-images/IDENTITY
 rm -rf iac/.terraform iac/terraform.tfstate iac/terraform.tfstate.backup iac/jenkins-jwks.json
 # Stage 1 (shared chainguard_identity + rolebinding) state lives under
 # mirrors/_common/terraform/. The captured kind JWKS sits next to it.
 rm -rf mirrors/_common/terraform/.terraform mirrors/_common/terraform/terraform.tfstate mirrors/_common/terraform/terraform.tfstate.backup mirrors/_common/terraform/terraform.tfvars mirrors/_common/terraform/k8s-jwks.json mirrors/_common/terraform/.terraform.lock.hcl
+# Rendered kind config (the .template lives next to it in git).
+rm -f  mirrors/_common/kind/config.yaml
 # Stage 2 (Harbor-specific harbor_registry + harbor_project) state lives
 # under mirrors/harbor/terraform/. No tfvars here — stage 2 takes no inputs.
 rm -rf mirrors/harbor/terraform/.terraform mirrors/harbor/terraform/terraform.tfstate mirrors/harbor/terraform/terraform.tfstate.backup mirrors/harbor/terraform/.terraform.lock.hcl

@@ -28,7 +28,4 @@ data:
         enabled: true
         interval: 10s
         threshold: 3
-    proxy:
-      remoteurl: http://cgr-oidc-proxy.cgr-oidc-proxy.svc.cluster.local:5000
-      # No username/password: the cgr-oidc-proxy injects the OIDC-derived
-      # bearer itself on every outbound request to cgr.dev.
+${PROXY_BLOCK}

@@ -13,6 +13,14 @@
 # so HTTP→HTTPS isn't forced — that lets `docker push` over HTTP coexist
 # with the HTTPS UI on the same ingress.
 externalURL: http://localhost
+# Top-level imagePullSecrets is propagated by the Harbor chart to every
+# component's PodSpec. The `regcred` Secret only exists in AUTH_MODE=
+# pull-token (created by the shared bootstrap in mirror-harbor); in
+# AUTH_MODE=proxy the reference is a harmless dangler — kubelet's
+# containerd cgr.dev mirror redirects pulls to the in-cluster proxy
+# before any imagePullSecret is consulted.
+imagePullSecrets:
+  - name: regcred
 expose:
   type: ingress
   tls:

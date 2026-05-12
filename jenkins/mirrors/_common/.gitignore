@@ -10,3 +10,12 @@ terraform/terraform.tfvars
 # Cluster JWKS captured at deploy time (kind-cluster-specific keys; uploaded
 # inline as the Chainguard identity's issuer_keys, no need to commit).
 terraform/k8s-jwks.json
+
+# Chainguard pull tokens minted in AUTH_MODE=pull-token. Each file is
+# `chainctl auth pull-token create -o json` output (identity_id + token);
+# tokens are user-secret, scope-limited basic-auth creds and must never
+# be committed.
+.pull-tokens/
+
+# Rendered kind cluster config (template lives next to it: config.yaml.template).
+kind/config.yaml

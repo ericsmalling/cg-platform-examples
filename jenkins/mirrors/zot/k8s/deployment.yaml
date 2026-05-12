@@ -52,6 +52,15 @@ spec:
             - name: config
               mountPath: /etc/zot
               readOnly: true
+            # Mounted as a subPath so it sits alongside config.json in
+            # /etc/zot without shadowing the rest of the configMap mount.
+            # In proxy mode the Secret doesn't exist (optional: true) and
+            # this subPath is simply absent, which is fine — the rendered
+            # config.json doesn't reference credentialsFile in that mode.
+            - name: sync-creds
+              mountPath: /etc/zot/creds.json
+              subPath: creds.json
+              readOnly: true
             - name: storage
               mountPath: /var/lib/registry
       volumes:
@@ -61,6 +70,10 @@ spec:
             items:
               - key: config.json
                 path: config.json
+        - name: sync-creds
+          secret:
+            secretName: zot-sync-creds
+            optional: true
         # emptyDir is sufficient for the demo — synced layers and pushed
         # artifacts disappear with the pod, which is fine since teardown
         # tears the whole kind cluster anyway.

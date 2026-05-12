@@ -16,6 +16,7 @@ spec:
         app: distribution-proxy
     spec:
       automountServiceAccountToken: false
+${IMAGE_PULL_SECRETS_BLOCK}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

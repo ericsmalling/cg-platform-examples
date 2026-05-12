@@ -44,6 +44,17 @@ PASSWORD_FILE="${SECRETS_DIR}/admin.password"
 
 CGR_OIDC_PROXY_URL="${CGR_OIDC_PROXY_URL:-http://cgr-oidc-proxy.cgr-oidc-proxy.svc.cluster.local:5000}"
 
+AUTH_MODE="${AUTH_MODE:-proxy}"
+PULL_USER="${PULL_USER:-}"
+PULL_PASS="${PULL_PASS:-}"
+CHAINGUARD_ORG="${CHAINGUARD_ORG:-}"
+
+if [[ "$AUTH_MODE" == "pull-token" ]]; then
+  : "${CHAINGUARD_ORG:?CHAINGUARD_ORG must be set in pull-token mode}"
+  : "${PULL_USER:?PULL_USER must be set in pull-token mode}"
+  : "${PULL_PASS:?PULL_PASS must be set in pull-token mode}"
+fi
+
 # ---- Port-forward to the JCR Service for the duration of this script ----
 echo "==> Starting kubectl port-forward to JCR (svc/${JCR_SERVICE} :8082 → 127.0.0.1:${JCR_LOCAL_PORT})..."
 kubectl -n "$JCR_NAMESPACE" port-forward "svc/${JCR_SERVICE}" "${JCR_LOCAL_PORT}:8082" >/dev/null 2>&1 &
@@ -109,8 +120,31 @@ curl -fsS "${AUTH[@]}" -X POST \
 # endpoint with a YAML body, however, is open in CE and creates remote,
 # local, and virtual repos in a single call. PATCH is idempotent:
 # re-running merges the same YAML in place.
-echo "==> Creating Docker repos via PATCH /api/system/configuration..."
-PATCH_BODY="$(cat <<EOF
+echo "==> Creating Docker repos via PATCH /api/system/configuration (auth mode: ${AUTH_MODE})..."
+if [[ "$AUTH_MODE" == "pull-token" ]]; then
+  CGR_REMOTE_URL="https://cgr.dev/${CHAINGUARD_ORG}"
+  PATCH_BODY="$(cat <<EOF
+remoteRepositories:
+  cgr-proxy:
+    type: docker
+    url: "${CGR_REMOTE_URL}"
+    username: "${PULL_USER}"
+    password: "${PULL_PASS}"
+localRepositories:
+  library:
+    type: docker
+    dockerApiVersion: V2
+virtualRepositories:
+  library-group:
+    type: docker
+    repositories:
+      - cgr-proxy
+      - library
+    defaultDeploymentRepo: library
+EOF
+)"
+else
+  PATCH_BODY="$(cat <<EOF
 remoteRepositories:
   cgr-proxy:
     type: docker
@@ -128,6 +162,7 @@ virtualRepositories:
     defaultDeploymentRepo: library
 EOF
 )"
+fi
 
 curl -fsS "${AUTH[@]}" -X PATCH \
   -H 'Content-Type: application/yaml' \

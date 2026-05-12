@@ -51,12 +51,25 @@ echo "==> Waiting for Nexus rollout (slow start: ~2-3 minutes)..."
 kubectl -n "$MIRROR_NAMESPACE" rollout status deployment/nexus-ce --timeout=10m
 
 # ---- Stage 3: REST bootstrap (admin pw rotation + repo create) ---------
+# AUTH_MODE/PULL_USER/PULL_PASS/CHAINGUARD_ORG drive whether the cgr-proxy
+# repo is configured to talk to the in-cluster cgr-oidc-proxy (proxy mode)
+# or directly to cgr.dev/<org> with a pull-token basic-auth (pull-token mode).
 echo "==> Bootstrapping Nexus repositories via REST..."
-NEXUS_NAMESPACE="$MIRROR_NAMESPACE" "$SCRIPT_DIR/bootstrap-repos.sh"
+NEXUS_NAMESPACE="$MIRROR_NAMESPACE" \
+AUTH_MODE="${AUTH_MODE:-proxy}" \
+PULL_USER="${PULL_USER:-}" \
+PULL_PASS="${PULL_PASS:-}" \
+PULL_TOKEN_TTL="${PULL_TOKEN_TTL:-}" \
+CHAINGUARD_ORG="$CHAINGUARD_ORG" \
+  "$SCRIPT_DIR/bootstrap-repos.sh"
 
 echo "==> Done."
 echo "    Nexus UI:           http://localhost:8081 (admin / ${NEXUS_ADMIN_PASS:-admin123})"
 echo "    Pull through cgr.dev: localhost:5053/<image>:<tag>      (cgr-proxy)"
 echo "    Push hosted target:   localhost:5060/<image>:<tag>      (library)"
 echo "    Admin password:     /tmp/cgjenkins-home/.secrets/nexus-ce/admin.password"
-echo "    cgr.dev proxy:      cgr-oidc-proxy.cgr-oidc-proxy.svc.cluster.local:5000 (no long-lived pull token; OIDC-derived bearer auto-rotates)"
+if [[ "${AUTH_MODE:-proxy}" == "pull-token" ]]; then
+  echo "    cgr.dev upstream:   https://cgr.dev/${CHAINGUARD_ORG} (basic-auth via chainctl pull token)"
+else
+  echo "    cgr.dev proxy:      cgr-oidc-proxy.cgr-oidc-proxy.svc.cluster.local:5000 (no long-lived pull token; OIDC-derived bearer auto-rotates)"
+fi
