@@ -60,7 +60,11 @@ echo "==> Applying JCR manifests in namespace ${JCR_NAMESPACE}..."
 kubectl apply -f k8s/
 
 echo "==> Waiting for JCR rollout (this can take 4-5 minutes on a cold start)..."
-kubectl -n "$JCR_NAMESPACE" rollout status deployment/jcr --timeout=15m
+# rollout-status --timeout must be >= the Deployment's progressDeadlineSeconds
+# (1200s = 20m, set in k8s/deployment.yaml). A shorter client timeout
+# returns "exceeded its progress deadline" before the controller has
+# actually given up.
+kubectl -n "$JCR_NAMESPACE" rollout status deployment/jcr --timeout=20m
 
 echo "==> Configuring JCR Docker repos via REST API..."
 "$SCRIPT_DIR/bootstrap-repos.sh"

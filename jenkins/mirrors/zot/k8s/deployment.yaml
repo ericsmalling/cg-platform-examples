@@ -52,14 +52,16 @@ spec:
             - name: config
               mountPath: /etc/zot
               readOnly: true
-            # Mounted as a subPath so it sits alongside config.json in
-            # /etc/zot without shadowing the rest of the configMap mount.
-            # In proxy mode the Secret doesn't exist (optional: true) and
-            # this subPath is simply absent, which is fine — the rendered
-            # config.json doesn't reference credentialsFile in that mode.
+            # Mounted at its own dir, not as a subPath into /etc/zot, to
+            # avoid the kubelet trying to bind-mount the Secret's creds.json
+            # subPath onto a path that doesn't exist in the read-only
+            # configMap mount (the configMap only exposes config.json) —
+            # which fails with "not a directory" on runc create. In proxy
+            # mode the Secret doesn't exist (optional: true), the volume
+            # becomes empty, and the rendered config.json doesn't reference
+            # credentialsFile, so nothing here is exercised.
             - name: sync-creds
-              mountPath: /etc/zot/creds.json
-              subPath: creds.json
+              mountPath: /etc/zot-creds
               readOnly: true
             - name: storage
               mountPath: /var/lib/registry

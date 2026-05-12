@@ -1,0 +1,2 @@
+# Per-test stdout+stderr captures from run-mirror-matrix.sh.
+.logs/

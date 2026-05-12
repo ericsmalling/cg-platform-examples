@@ -7,6 +7,12 @@ metadata:
     app.kubernetes.io/name: jcr
 spec:
   replicas: 1
+  # JCR's cold-start is slow (~4-5 min on a warm host, longer if the image
+  # has to pull). The default progressDeadlineSeconds=600 trips the
+  # rollout into a `ProgressDeadlineExceeded` failure before the Pod is
+  # Ready, even though kubectl's --timeout would let it continue. Bumping
+  # to 20 minutes covers cold-start runs (e.g. CI, fresh kind clusters).
+  progressDeadlineSeconds: 1200
   # Recreate avoids two pods racing for the same RWO PVC during rollouts.
   strategy:
     type: Recreate

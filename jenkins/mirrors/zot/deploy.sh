@@ -59,16 +59,18 @@ case "$AUTH_MODE" in
   pull-token)
     SYNC_URL="https://cgr.dev"
     SYNC_TLS_VERIFY="true"
-    SYNC_CREDENTIALS_FILE_BLOCK='"credentialsFile": "/etc/zot/creds.json",
+    SYNC_CREDENTIALS_FILE_BLOCK='"credentialsFile": "/etc/zot-creds/creds.json",
               '
     # zot's sync credentialsFile is a JSON map keyed by registry URL.
     # Re-applied (apply-with-dry-run-merge) so re-runs pick up a rotated token.
-    creds_json="$(python3 -c '
-import json, os, sys
+    # Env vars MUST precede `python3` so the subprocess sees them via
+    # os.environ — passing them as positional args after `-c '...'` would
+    # leave them in sys.argv, not the environment.
+    creds_json="$(SYNC_URL="$SYNC_URL" PULL_USER="$PULL_USER" PULL_PASS="$PULL_PASS" python3 -c '
+import json, os
 print(json.dumps({os.environ["SYNC_URL"]: {"username": os.environ["PULL_USER"], "password": os.environ["PULL_PASS"]}}))
-' SYNC_URL="$SYNC_URL")"
-    SYNC_URL="$SYNC_URL" PULL_USER="$PULL_USER" PULL_PASS="$PULL_PASS" \
-      kubectl -n "$ZOT_NAMESPACE" create secret generic zot-sync-creds \
+')"
+    kubectl -n "$ZOT_NAMESPACE" create secret generic zot-sync-creds \
       --from-literal=creds.json="$creds_json" \
       --dry-run=client -o yaml | kubectl apply -f -
     ;;
@@ -88,9 +90,17 @@ kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
 
-# Bounce the deployment so a re-run picks up an updated ConfigMap.
-kubectl -n "$ZOT_NAMESPACE" rollout restart deployment/zot
-kubectl -n "$ZOT_NAMESPACE" rollout status deployment/zot --timeout=3m
+# Bounce the deployment so a re-run picks up an updated ConfigMap. Skip
+# on a freshly-created deployment — back-to-back create+restart can leave
+# the old (still-Pending) ReplicaSet wedged in "pending termination" past
+# the rollout-status timeout. We detect a fresh deployment by checking
+# whether the existing object already has a previous restart annotation.
+if kubectl -n "$ZOT_NAMESPACE" get deployment zot \
+     -o jsonpath='{.spec.template.metadata.annotations.kubectl\.kubernetes\.io/restartedAt}' \
+     2>/dev/null | grep -q .; then
+  kubectl -n "$ZOT_NAMESPACE" rollout restart deployment/zot
+fi
+kubectl -n "$ZOT_NAMESPACE" rollout status deployment/zot --timeout=5m
 
 echo "==> Done."
 echo "    Pull through cgr.dev:  localhost:5052/<image>:<tag>"

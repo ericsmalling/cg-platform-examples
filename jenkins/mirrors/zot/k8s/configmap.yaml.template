@@ -21,12 +21,12 @@ data:
       "extensions": {
         "sync": {
           "enable": true,
-          "registries": [
+          ${SYNC_CREDENTIALS_FILE_BLOCK}"registries": [
             {
               "urls": ["${SYNC_URL}"],
               "onDemand": true,
               "tlsVerify": ${SYNC_TLS_VERIFY},
-              ${SYNC_CREDENTIALS_FILE_BLOCK}"content": [
+              "content": [
                 {
                   "prefix": "${CHAINGUARD_ORG}/**",
                   "stripPrefix": true

@@ -61,18 +61,27 @@ if compgen -G "$PULL_TOKEN_DIR/*.json" >/dev/null; then
   else
     for tf in "$PULL_TOKEN_DIR"/*.json; do
       [[ -e "$tf" ]] || continue
-      uidp="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("identity_id",""))' "$tf" 2>/dev/null || true)"
+      # The pull token IS a chainguard identity; chainctl tracks it by `id`
+      # (a "<org-uidp>/<id>" pair from the create response, also the form
+      # accepted by `chainctl iam identities delete`). We also keep
+      # identity_id (the same UIDP, no slash) and name for diagnostics.
+      delete_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$tf" 2>/dev/null || true)"
+      if [[ -z "$delete_id" ]]; then
+        # Older cache files may not have `id` — fall back to identity_id.
+        delete_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("identity_id",""))' "$tf" 2>/dev/null || true)"
+      fi
       name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("name",""))' "$tf" 2>/dev/null || true)"
-      if [[ -z "$uidp" ]]; then
-        echo "    WARN: $tf has no identity_id; can't delete via chainctl. Leaving it for manual cleanup."
+      if [[ -z "$delete_id" ]]; then
+        echo "    WARN: $tf has no id/identity_id; can't delete via chainctl. Leaving it for manual cleanup."
         continue
       fi
-      echo "    Deleting pull token ${name:-?} ($uidp)..."
-      # chainctl auth pull-token delete takes the identity UIDP positionally;
-      # --yes suppresses the confirmation prompt. We tolerate failure (e.g.
-      # token already gone, or installed chainctl uses a different verb) so
-      # one stale entry doesn't block the rest of teardown.
-      chainctl auth pull-token delete "$uidp" --yes 2>&1 | sed 's/^/      /' || \
+      echo "    Deleting pull token ${name:-?} ($delete_id)..."
+      # `chainctl auth pull-token` exposes only create + list — pull tokens
+      # are deleted as identities. The command prompts for confirmation
+      # interactively (no --yes flag in current chainctl), so feed `y`
+      # via stdin. We tolerate failure (token may have already expired
+      # via TTL) so one stale entry doesn't block the rest of teardown.
+      printf 'y\n' | chainctl iam identities delete "$delete_id" 2>&1 | sed 's/^/      /' || \
         echo "      (delete failed — token may have already expired or chainctl syntax differs)"
     done
   fi
