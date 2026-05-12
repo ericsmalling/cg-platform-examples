@@ -1,0 +1,142 @@
+# cgr-oidc-proxy: in-cluster reverse proxy that fronts cgr.dev with a
+# short-lived Chainguard token derived from a projected SA JWT.
+#
+# Namespace `cgr-oidc-proxy` is created by the shared bootstrap
+# (mirrors/_common/bootstrap.sh); not declared here. The proxy lives in its
+# own namespace and is shared by all OCI mirror tools (harbor, distribution,
+# zot, nexus-ce, jcr).
+# ConfigMap `cgr-oidc-proxy-config` is created/updated by the bootstrap from
+# the terraform `chainguard_identity` output (key: identity); not baked here.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cgr-oidc-proxy
+  namespace: cgr-oidc-proxy
+# The proxy needs only the projected cgr token volume (declared below).
+# It does NOT need to talk to the k8s API, so we disable the default
+# service-account-token mount entirely.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cgr-oidc-proxy
+  namespace: cgr-oidc-proxy
+  labels:
+    app: cgr-oidc-proxy
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): the pod uses hostPort 5000 which is
+  # node-exclusive on a single-node kind cluster, so a rolling update
+  # would deadlock — the new pod can't schedule while the old one holds
+  # the port. Recreate terminates the old pod first.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cgr-oidc-proxy
+  template:
+    metadata:
+      labels:
+        app: cgr-oidc-proxy
+    spec:
+      serviceAccountName: cgr-oidc-proxy
+      automountServiceAccountToken: false
+      # hostNetwork so containerd on the kind node can reach the proxy via
+      # 127.0.0.1:5000 for the cgr.dev mirror configured in containerdConfigPatches.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # PodSecurityStandards "restricted" baseline. runAsUser is required
+      # at the pod level whenever runAsGroup is set — without it, the
+      # sandbox/pause container fails to start with "user group '65532'
+      # is specified without user" because the sandbox doesn't inherit
+      # the container-level securityContext.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: cgr-oidc-proxy:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen=:5000
+            - --token-file=/var/run/secrets/cgr/token
+          env:
+            - name: CGR_IDENTITY
+              valueFrom:
+                configMapKeyRef:
+                  name: cgr-oidc-proxy-config
+                  key: identity
+          ports:
+            - name: http
+              containerPort: 5000
+              hostPort: 5000
+              protocol: TCP
+          volumeMounts:
+            - name: cgr-token
+              mountPath: /var/run/secrets/cgr
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: cgr-token
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  audience: issuer.enforce.dev
+                  expirationSeconds: 3600
+                  path: token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cgr-oidc-proxy
+  namespace: cgr-oidc-proxy
+  labels:
+    app: cgr-oidc-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: cgr-oidc-proxy
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      protocol: TCP

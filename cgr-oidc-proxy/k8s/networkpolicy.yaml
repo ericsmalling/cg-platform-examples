@@ -1,0 +1,49 @@
+# NetworkPolicy: restrict who can reach the cgr-oidc-proxy on :5000.
+#
+# The proxy has registry.pull privileges on a Chainguard org. Anyone who
+# reaches it can pull images using that privilege, so we narrow ingress to
+# the consumer namespaces that legitimately need it:
+#
+#   - mirror-harbor, mirror-distribution, mirror-zot, mirror-nexus-ce,
+#     mirror-jcr — the OCI mirror tools that consume cgr-oidc-proxy as
+#     their upstream.
+#   - cgr-oidc-proxy itself — self-traffic and healthchecks.
+#
+# This policy applies to ClusterIP traffic only. Because the pod also runs
+# with `hostNetwork: true` (so containerd on the node can hit 127.0.0.1:5000
+# for image-pull mirroring), traffic over the host loopback is NOT covered
+# by NetworkPolicy. Operators who can't trust the node itself need to
+# disable hostNetwork before relying on this NetworkPolicy as the only
+# isolation layer.
+#
+# Namespaces must carry a `kubernetes.io/metadata.name` label that matches
+# their name — every namespace gets this label automatically since k8s 1.21,
+# so no explicit labelling is required.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cgr-oidc-proxy-ingress
+  namespace: cgr-oidc-proxy
+spec:
+  podSelector:
+    matchLabels:
+      app: cgr-oidc-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - cgr-oidc-proxy
+                  - mirror-harbor
+                  - mirror-distribution
+                  - mirror-zot
+                  - mirror-nexus-ce
+                  - mirror-jcr
+                  - ingress-nginx
+      ports:
+        - port: 5000
+          protocol: TCP
