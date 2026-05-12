@@ -2,14 +2,16 @@
 # Stage 1: install npm dependencies on the dev image, which ships npm.
 # Stage 2 then copies the populated node_modules + app source into the
 # shell-less runtime image (node:22), which has only the node binary.
-ARG CHAINGUARD_ORG
+# PULL_REGISTRY routes base-image pulls through whichever mirror tool setup.sh
+# picked. See python312-pip-django/Dockerfile for the full rationale.
+ARG PULL_REGISTRY
 
-FROM cgr.dev/${CHAINGUARD_ORG}/node:22-dev AS build
+FROM ${PULL_REGISTRY}/node:22-dev AS build
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
-FROM cgr.dev/${CHAINGUARD_ORG}/node:22
+FROM ${PULL_REGISTRY}/node:22
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY package.json server.js ./

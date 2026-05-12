@@ -54,7 +54,7 @@ pipeline {
       agent any
       steps {
         unstash 'src'
-        sh 'docker build --build-arg CHAINGUARD_ORG="$CHAINGUARD_ORG" -t "$IMAGE" .'
+        sh 'docker build --build-arg PULL_REGISTRY="$PULL_REGISTRY" -t "$IMAGE" .'
       }
     }
 

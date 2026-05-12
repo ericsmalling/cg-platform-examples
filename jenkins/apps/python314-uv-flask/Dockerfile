@@ -3,15 +3,17 @@
 # ships uv pre-installed). Stage 2 then copies the populated site-packages
 # directory into the shell-less runtime python image — same Python minor
 # version on both sides keeps the packages compatible.
-ARG CHAINGUARD_ORG
+# PULL_REGISTRY routes base-image pulls through whichever mirror tool setup.sh
+# picked. See python312-pip-django/Dockerfile for the full rationale.
+ARG PULL_REGISTRY
 
-FROM cgr.dev/${CHAINGUARD_ORG}/python:3.14-dev AS build
+FROM ${PULL_REGISTRY}/python:3.14-dev AS build
 USER 0
 WORKDIR /app
 COPY pyproject.toml ./
 RUN uv pip install --system --no-cache flask
 
-FROM cgr.dev/${CHAINGUARD_ORG}/python:3.14
+FROM ${PULL_REGISTRY}/python:3.14
 COPY --from=build /usr/lib/python3.14/site-packages /usr/lib/python3.14/site-packages
 COPY app.py /app/app.py
 WORKDIR /app
