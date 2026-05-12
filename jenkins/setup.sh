@@ -195,8 +195,10 @@ HARBOR_IMAGES=(
   harbor-core:latest
   harbor-jobservice:latest
   harbor-registry:latest
+  harbor-registryctl:latest
   harbor-trivy-adapter:latest
   harbor-db:latest
+  harbor-redis:latest
   ingress-nginx-controller:latest
   kube-webhook-certgen:latest
 )
