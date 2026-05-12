@@ -1,0 +1,72 @@
+// Scheduled job that re-resolves the digests in the cgImages shared library
+// catalog every 4 hours. Runs the existing refresh-digests.sh inside a
+// Chainguard crane container so the controller doesn't need crane baked in.
+//
+// The shared-libraries bind mount is :rw in docker-compose.yml — when this
+// job rewrites vars/cgImage.groovy, the change is visible on the host
+// filesystem (i.e. in the user's git checkout) and the next sample-app
+// pipeline run picks up the new digests automatically (filesystem-SCM
+// live-reload — see shared-libraries/cg-images/README.md#caveats).
+
+pipeline {
+  agent none
+  options { timestamps() }
+
+  // The seed in jobs.groovy sets the trigger via Jobs DSL; the schedule is
+  // captured here as documentation. Editing this comment does not change
+  // when the job runs — edit jobs.groovy and restart the controller for that.
+  //
+  // Schedule: H H/4 * * *  (every 4 hours, randomized per controller)
+
+  stages {
+    stage('Auth') {
+      agent any
+      steps { cgLogin() }
+    }
+
+    stage('Refresh digests') {
+      agent {
+        docker {
+          // Pull crane via PULL_REGISTRY (cgr.dev/<org> in Mode A,
+          // localhost/cgr-proxy/<org> in Modes B/C where the controller
+          // has no cgr.dev creds — same routing as cgImage() applies to
+          // the application build/test agents).
+          image "${env.PULL_REGISTRY ?: "cgr.dev/${env.CHAINGUARD_ORG}"}/crane:latest-dev"
+          // The agent inherits the controller's mounts via `--volumes-from`
+          // (Jenkins docker-workflow plugin default), so the shared-libraries
+          // tree (rw) and the pull-token docker config are already visible at
+          // /tmp/cgjenkins-home/... — no extra `-v` flags needed.
+          //   -- entrypoint:    clear so Jenkins' cat-keepalive works
+          //   -- network host:  crane resolves localhost:80 (Harbor proxy in
+          //      Modes B/C) the same way the host docker daemon does. Without
+          //      this, the agent container's own loopback intercepts the
+          //      lookup and produces "connection refused" on Mode B/C runs.
+          //      Harmless in Mode A — there's nothing on host port 80 then,
+          //      and crane talks to cgr.dev over public DNS regardless.
+          //   -- DOCKER_CONFIG: point crane at the inherited pull-token config
+          //   -- CHAINGUARD_ORG / PULL_REGISTRY: forward from controller env
+          //      so refresh-digests.sh queries through the right registry —
+          //      cgr.dev directly in Mode A, anonymous Harbor proxy in B/C.
+          //      The docker-workflow plugin only carries env vars listed
+          //      here into the agent container.
+          // Use `?: ''` (not direct interpolation) so a missing env var
+          // collapses to empty rather than the literal "null" — Groovy
+          // GString stringifies a null reference, which would otherwise
+          // bake PULL_REGISTRY=null into the agent env and break the
+          // PULL_REGISTRY:-default fallback in refresh-digests.sh.
+          args "--entrypoint= --network host -e DOCKER_CONFIG=/tmp/cgjenkins-home/.docker -e CHAINGUARD_ORG=${env.CHAINGUARD_ORG ?: ''} -e PULL_REGISTRY=${env.PULL_REGISTRY ?: ''}"
+          reuseNode true
+        }
+      }
+      steps {
+        sh '/tmp/cgjenkins-home/shared-libraries/cg-images/refresh-digests.sh'
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "Refresh complete. Any digest changes are picked up on the next sample-app pipeline run automatically."
+    }
+  }
+}

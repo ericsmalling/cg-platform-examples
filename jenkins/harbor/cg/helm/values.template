@@ -1,0 +1,76 @@
+# HTTPS is required for the UI: Harbor 2.12.3+ pulled in gorilla/csrf v1.7.3,
+# which hardcodes the request scheme to "https" inside its origin check, and
+# Harbor's middleware never wraps the request as plaintext. So a browser
+# POST /c/login over HTTP fails with 403 "origin invalid" before the password
+# is ever checked. Upstream bug: goharbor/harbor#22010. Until that ships a
+# fix, we serve the UI over HTTPS with an auto-generated self-signed cert.
+# Browsers show a one-time cert warning; click through to log in.
+#
+# externalURL stays http://localhost so Harbor's registry path (used by
+# `docker push localhost/library/...`) advertises HTTP back to clients. The
+# Docker daemon refuses HTTPS to 127.0.0.0/8 by default, so HTTPS on the
+# registry path would break pipeline pushes. We also disable ssl-redirect
+# so HTTP→HTTPS isn't forced — that lets `docker push` over HTTP coexist
+# with the HTTPS UI on the same ingress.
+externalURL: http://localhost
+# Admin password injected at deploy-template-render time from the host env.
+# deploy.sh defaults this to "Harbor12345" (the chart's own default) when
+# unset, so out-of-the-box demos still work. To override, set
+# HARBOR_ADMIN_PASSWORD in .env before running ./setup.sh.
+harborAdminPassword: "${HARBOR_ADMIN_PASSWORD}"
+expose:
+  type: ingress
+  tls:
+    enabled: true
+    certSource: auto
+    auto:
+      commonName: "localhost"
+  ingress:
+    hosts:
+      core: localhost
+    annotations:
+      ingress.kubernetes.io/ssl-redirect: "false"
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+
+imagePullSecrets:
+  - name: regcred
+
+portal:
+  image:
+    repository: $REGISTRY_URL/harbor-portal
+    tag: latest
+
+core:
+  image:
+    repository: $REGISTRY_URL/harbor-core
+    tag: latest
+
+  jobservice:
+    image:
+      repository: $REGISTRY_URL/harbor-jobservice
+      tag: latest
+
+registry:
+  registry:
+    image:
+      repository: $REGISTRY_URL/harbor-registry
+      tag: latest
+
+trivy:
+  # Enable the Trivy vulnerability scanner.
+  enabled: true
+  image:
+    repository: $REGISTRY_URL/harbor-trivy-adapter
+    tag: latest
+  imagePullSecrets:
+    - name: regcred
+
+
+database:
+  type: internal
+  internal:
+    image:
+      repository: $REGISTRY_URL/harbor-db
+      tag: latest
+
+

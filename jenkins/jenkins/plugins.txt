@@ -1,0 +1,32 @@
+# Plugins are deliberately unpinned: this is a demo image rebuilt on demand
+# (docker compose build), and we want each rebuild to pick up the current
+# Jenkins-recommended plugin versions. For a production controller you'd
+# pin each line as `plugin:version` (or generate a lockfile via
+# `jenkins-plugin-cli --list-plugins --output txt --available-updates=false`)
+# and bump them through a controlled review process.
+configuration-as-code
+job-dsl
+workflow-aggregator
+docker-workflow
+pipeline-utility-steps
+git
+timestamper
+ws-cleanup
+# Filesystem SCM — lets Jenkins shared libraries load from a local directory
+# instead of a remote Git repo. We use it to source the cg-images library
+# from the bind-mounted ./shared-libraries dir.
+filesystem_scm
+# OIDC Provider — makes Jenkins itself an OpenID Connect issuer so pipelines
+# can mint a short-lived JWT per build. The `withCredentials` step exposes the
+# token as a string credential, which cgLogin then exchanges for a Chainguard
+# chainctl session.
+oidc-provider
+# plain-credentials — provides the "Secret file" and "Secret text" credential
+# types JCasC uses to register the cosign signing key (file), public key
+# (file), and password (string). Pipelines pull all three through
+# `withCredentials` in cgSign.groovy / cgVerify.groovy.
+plain-credentials
+# pipeline-graph-view — modern stage-graph UI that renders the build's
+# Pipeline Overview tab as a left-to-right graph. Easier to scan than the
+# classic Stage View, especially for pipelines with many sequential stages.
+pipeline-graph-view

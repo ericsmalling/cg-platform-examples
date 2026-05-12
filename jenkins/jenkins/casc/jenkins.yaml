@@ -1,0 +1,127 @@
+jenkins:
+  systemMessage: "Chainguard Jenkins demo — pipelines build & test on cgr.dev/${CHAINGUARD_ORG}/ images."
+  numExecutors: 2
+  mode: NORMAL
+  scmCheckoutRetryCount: 0
+  # Surface the controller-process CHAINGUARD_ORG env var into pipeline `env`
+  # so Jenkinsfiles can use ${env.CHAINGUARD_ORG} in agent docker image strings.
+  globalNodeProperties:
+    - envVars:
+        env:
+          - key: CHAINGUARD_ORG
+            value: ${CHAINGUARD_ORG}
+          # Registry routing — set by setup.sh:
+          # cgImage.groovy uses PULL_REGISTRY; OCI-image apps' IMAGE uses PUSH_REGISTRY;
+          # cgLogin.groovy short-circuits when HARBOR_ENABLED is true.
+          - key: PULL_REGISTRY
+            value: ${PULL_REGISTRY:-cgr.dev/${CHAINGUARD_ORG}}
+          - key: PUSH_REGISTRY
+            value: ${PUSH_REGISTRY:-ttl.sh/smalls}
+          - key: HARBOR_ENABLED
+            value: ${HARBOR_ENABLED:-false}
+          # Surface the Harbor admin password to pipelines so cgLogin's
+          # Mode C path can read it from env.HARBOR_ADMIN_PASSWORD instead
+          # of hardcoding the chart default. Empty in Modes A/B; cgLogin
+          # only reads it on the Mode C push-auth path.
+          - key: HARBOR_ADMIN_PASSWORD
+            value: ${HARBOR_ADMIN_PASSWORD:-}
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD:-admin}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+security:
+  # Configure the Jenkins-as-OIDC-issuer plugin's claim templates. Override
+  # the default subject (which would be ${JOB_URL}) with a fixed string,
+  # because our chainguard_identity uses a `static` block which requires
+  # an exact subject match. The single literal subject means all builds
+  # appear as the same Chainguard identity, but each build still gets a
+  # freshly-signed short-lived JWT.
+  idToken:
+    buildClaimTemplates:
+      - name: sub
+        format: jenkins-cgimages-puller
+        type: "stringClaimType"
+
+unclassified:
+  location:
+    # jenkins.location.url drives the `iss` claim Jenkins puts in OIDC tokens
+    # via the oidc-provider plugin (no per-credential override). The
+    # chainguard_identity static block validator requires HTTPS, so we lie
+    # about the scheme here. The plugin still serves JWKS at the real
+    # http://localhost:8080/oidc/jwks (setup.sh fetches it from there);
+    # Chainguard verifies tokens offline against the uploaded JWKS by
+    # string-comparing the iss claim, so the URL never has to resolve.
+    url: "https://localhost:8080/"
+  globalLibraries:
+    libraries:
+      - name: cgImages
+        # Auto-loaded for every pipeline (no @Library annotation needed).
+        implicit: true
+        defaultVersion: master
+        retriever:
+          legacySCM:
+            # `clone: true` forces a fresh checkout per build, otherwise
+            # filesystem_scm caches the library workspace and edits may
+            # not propagate to the next build.
+            clone: true
+            scm:
+              filesystem:
+                path: /tmp/cgjenkins-home/shared-libraries/cg-images
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          # OIDC token issued per-build by Jenkins itself (oidc-provider plugin).
+          # cgLogin in the cgImages shared library pulls this via withCredentials
+          # and exchanges it for a short-lived chainctl session.
+          - idToken:
+              scope: GLOBAL
+              id: jenkins-cgr-oidc
+              description: "Per-build OIDC token for Chainguard assumed-identity exchange"
+              # Chainguard's STS issuer expects this audience. Same value used
+              # by sibling examples like image-copy-gcp/main.go:341.
+              audience: "https://issuer.enforce.dev"
+              # No `issuer:` override here — the plugin then uses
+              # jenkins.location.url (set above to https://localhost:8080/)
+              # AND serves JWKS at http://localhost:8080/oidc/jwks. With a
+              # custom issuer set per-credential, the plugin would refuse
+              # to serve JWKS at all (see plugin source: Keys.java).
+          # Cosign keypair used by cgSign / cgVerify to sign and verify the
+          # OCI images pushed by the Python/Node pipelines. setup.sh generates
+          # the keypair to /tmp/cgjenkins-home/.secrets/ once and reuses it on
+          # every re-run; the JCasC `${readFileBase64:…}` resolver loads the
+          # key + pub bytes into Jenkins's encrypted credentials store at boot.
+          # After that, /tmp/cgjenkins-home/.secrets/ is only used as the seed
+          # source — pipelines fetch creds by ID via withCredentials.
+          - file:
+              scope: GLOBAL
+              id: cosign-private-key
+              fileName: cosign.key
+              description: "cosign private key (encrypted with cosign-password)"
+              secretBytes: "${readFileBase64:/tmp/cgjenkins-home/.secrets/cosign.key}"
+          - file:
+              scope: GLOBAL
+              id: cosign-public-key
+              fileName: cosign.pub
+              description: "cosign public key — used by cgVerify"
+              secretBytes: "${readFileBase64:/tmp/cgjenkins-home/.secrets/cosign.pub}"
+          - string:
+              scope: GLOBAL
+              id: cosign-password
+              description: "passphrase that decrypts cosign-private-key"
+              # Read the passphrase directly from the bind-mounted secret file
+              # rather than via the controller's env. Avoids leaving the
+              # passphrase visible to `docker inspect` and prevents accidental
+              # propagation into build logs (the env-var path used to be one
+              # `echo $COSIGN_PASSWORD` in a debug step away from disclosure).
+              secret: "${readFile:/tmp/cgjenkins-home/.secrets/cosign.password}"
+
+jobs:
+  - file: /tmp/cgjenkins-home/casc/jobs.groovy

@@ -1,0 +1,22 @@
+variable "chainguard_group_name" {
+  description = "Chainguard parent group name (e.g. 'chainguard' or 'your-org.example.com'). Must match CHAINGUARD_ORG used by the rest of the demo. setup.sh always passes this via -var on the command line."
+  type        = string
+}
+
+variable "jenkins_issuer_url" {
+  description = "Issuer URL claim that Jenkins puts in OIDC tokens. Must be HTTPS (Chainguard provider validator) and must exactly match the iss claim Jenkins emits — which is jenkins.location.url + '/oidc'. The static block does offline JWKS verification, so the URL never has to resolve."
+  type        = string
+  default     = "https://localhost:8080/oidc"
+}
+
+variable "identity_expiration" {
+  description = "RFC3339 timestamp at which the assumed identity stops accepting tokens. Must be in the future (Chainguard provider validates this at plan time). Default is set well into the future so demo-runners don't have to bump it; rotate sooner by overriding this variable. We deliberately keep a fixed default rather than computing `timeadd(timestamp(), ...)` because `timestamp()` is recomputed on every plan and would force a churned apply every time."
+  type        = string
+  default     = "2030-01-01T00:00:00Z"
+}
+
+variable "jenkins_subject" {
+  description = "Subject claim that Jenkins puts in every OIDC token it issues to the cgr.dev credential. Configured in jenkins.yaml; must match here exactly."
+  type        = string
+  default     = "jenkins-cgimages-puller"
+}

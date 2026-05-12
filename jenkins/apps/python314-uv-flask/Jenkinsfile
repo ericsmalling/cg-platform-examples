@@ -1,0 +1,102 @@
+def img = cgImage('python-3.14')
+
+pipeline {
+  agent none
+  options { timestamps() }
+
+  environment {
+    // env.PUSH_REGISTRY is set by JCasC globalNodeProperties (driven by setup.sh):
+    // Modes A/B → ttl.sh/<prefix>, Mode C → localhost/library. Slash-separated
+    // works in both — ttl.sh accepts arbitrary paths, Harbor needs project/repo.
+    IMAGE = "${env.PUSH_REGISTRY}/pytest:3-14"
+  }
+
+  stages {
+    stage('Auth') {
+      agent any
+      steps { cgLogin() }
+    }
+
+    stage('Checkout') {
+      agent any
+      steps {
+        sh 'cp -R /sources/apps/python314-uv-flask/. .'
+        stash name: 'src', includes: '**'
+      }
+    }
+
+    stage('Build deps') {
+      agent {
+        docker {
+          image img.build
+          // Run as root: uv needs to write to /usr/lib/python3.14/site-packages
+          // which the default uid (65532) can't touch.
+          args '--user 0 --entrypoint='
+          reuseNode true
+        }
+      }
+      steps {
+        unstash 'src'
+        // Sanity-check that the dependency declaration in pyproject.toml
+        // resolves cleanly under the build image. The runtime image's
+        // site-packages is populated separately by the Dockerfile.
+        sh 'uv pip install --system --no-cache flask'
+        sh 'python -c "import flask; print(\\"flask\\", flask.__version__)"'
+      }
+    }
+
+    stage('Image build') {
+      agent any
+      steps {
+        unstash 'src'
+        sh 'docker build --build-arg PULL_REGISTRY="$PULL_REGISTRY" -t "$IMAGE" .'
+      }
+    }
+
+    stage('Test') {
+      agent any
+      steps {
+        // Run the built runtime image (which is shell-less) using an in-process
+        // Flask test client — no port mapping or networking required.
+        sh '''
+          set -e
+          out=$(docker run --rm --entrypoint=python -e PYTHONPATH=/app "$IMAGE" -c "
+from app import app
+c = app.test_client()
+r = c.get('/')
+assert r.status_code == 200, 'unexpected status: ' + str(r.status_code)
+assert b'Hello from Flask on Chainguard' in r.data, 'greeting missing'
+print('Smoke test passed')
+")
+          echo "$out"
+        '''
+      }
+    }
+
+    stage('Push') {
+      agent any
+      steps {
+        sh 'docker push "$IMAGE"'
+        // Pick the RepoDigest matching the repo we just pushed. `{{index
+        // .RepoDigests 0}}` returns whichever digest happens to be first
+        // in the local cache, which may belong to an unrelated registry
+        // from a previous run. Same pattern as cgSign/cgVerify.
+        sh '''
+          REPO="${IMAGE%:*}"
+          DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" | grep -F "${REPO}@" | head -1)
+          echo "Pushed $IMAGE digest=$DIGEST"
+        '''
+      }
+    }
+
+    stage('Sign') {
+      agent any
+      steps { cgSign(env.IMAGE) }
+    }
+
+    stage('Verify') {
+      agent any
+      steps { cgVerify(env.IMAGE) }
+    }
+  }
+}
