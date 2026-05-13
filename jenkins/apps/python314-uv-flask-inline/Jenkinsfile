@@ -1,89 +1,27 @@
-// Inlined twin of apps/python314-uv-flask/Jenkinsfile. Every call into the
-// `cg-images` shared library — cgImage, cgLogin, cgSign, cgVerify — is
-// expanded to the literal commands it produces, so a reader can see exactly
-// what Jenkins ends up running. This is a teaching artifact, not a
-// recommended pattern: in real pipelines the shared library makes the
-// auth / registry / digest plumbing reusable. Inlining sacrifices that
-// reuse for visibility.
-//
-// Hardcoded for the configuration the surrounding demo is currently running
-// under: setup.sh picked `harbor` as the mirror tool, `Push to library` for
-// the push target, AUTH_MODE=proxy, and CHAINGUARD_ORG=smalls.xyz. To run
-// this pipeline against a different mode / org, swap the four registry
-// constants at the top of `environment { ... }` and the BUILD/RUNTIME image
-// digests (which are pinned per cgr.dev org).
-//
-// Side-by-side mapping of each inlined block to the shared-library helper
-// it replaces — handy when reading this Jenkinsfile alongside its twin:
-//
-//   `cgImage('python-3.14').build`     → $BUILD_IMAGE
-//   `cgImage('python-3.14').runtime`   → $RUNTIME_IMAGE (referenced from
-//                                         the app's Dockerfile via FROM
-//                                         ${PULL_REGISTRY}/python:3.14)
-//   `cgLogin()` in harbor mode         → the Auth stage's `docker config
-//                                         write` snippet
-//   `cgSign(env.IMAGE)`                → the Sign stage's `docker run
-//                                         cosign sign ...` block
-//   `cgVerify(env.IMAGE)`              → the Verify stage's `docker run
-//                                         cosign verify ...` block
+// Inlined twin of apps/python314-uv-flask/Jenkinsfile — no shared-library
+// calls. Hardcoded for: harbor mirror, proxy auth, push to library,
+// CHAINGUARD_ORG=smalls.xyz. See README.md.
 
 pipeline {
   agent none
   options { timestamps() }
 
   environment {
-    // -- Registry routing (normally set by setup.sh → JCasC → env) ----------
-    CHAINGUARD_ORG = 'smalls.xyz'
-    PULL_REGISTRY  = 'localhost/cgr-proxy/smalls.xyz'
-    PUSH_REGISTRY  = 'localhost/library'
-    IMAGE          = "${env.PUSH_REGISTRY}/pytest-inline:3-14"
-
-    // -- Base images (normally resolved by cgImage) -------------------------
-    // The shared library returns `${PULL_REGISTRY}/<repo>:<tag>@<digest>`
-    // for each token in its catalog. Digests are refreshed periodically by
-    // the `refresh-cgimages-digests` job — see
-    // jenkins/shared-libraries/cg-images/vars/cgImage.groovy for the
-    // canonical catalog.
-    BUILD_IMAGE   = 'localhost/cgr-proxy/smalls.xyz/python:3.14-dev@sha256:aa69dcd8a8689f7584fd4e077a52c0f13812ec7f54ace6590ab31f4297b3129d'
-    RUNTIME_IMAGE = 'localhost/cgr-proxy/smalls.xyz/python:3.14@sha256:0d0af6d76f7caf6b0d21015b66089bef7f017d062652a3b297f211d07e319ec4'
-
-    // -- Cosign one-shot container image (used by Sign + Verify) ------------
-    // Tag-only is fine for the ephemeral cosign helper; we're not relying
-    // on its bytes for the artifact under test.
-    COSIGN_IMAGE = 'localhost/cgr-proxy/smalls.xyz/cosign:latest-dev'
-
-    // -- Harbor admin creds (normally injected by JCasC from .env) ---------
-    // Chart default. `setup.sh` writes a different value to .env if the
-    // user set HARBOR_ADMIN_PASSWORD before running it.
-    HARBOR_ADMIN_USER = 'admin'
-    HARBOR_ADMIN_PASS = 'Harbor12345'
+    IMAGE = 'localhost/library/pytest-inline:3-14'
   }
 
   stages {
 
-    // == INLINED: cgLogin() in harbor mode with localhost/* push target ====
-    // The shared-library function writes a DOCKER_CONFIG/config.json with
-    // basic-auth for `localhost` (used by `docker push`) and `localhost:80`
-    // (used by cosign — its reference parser rejects bare `localhost`).
-    // Both keys hold the same admin:Harbor12345 base64-encoded auth string.
     stage('Auth') {
       agent any
       steps {
         sh '''
           set -eu
           mkdir -p "$DOCKER_CONFIG"
-          # base64 of "admin:Harbor12345", produced inline so the password
-          # never enters the docker config file as plaintext via this script.
-          AUTH=$(printf '%s:%s' "$HARBOR_ADMIN_USER" "$HARBOR_ADMIN_PASS" | base64 | tr -d '\\n')
+          AUTH=$(printf 'admin:Harbor12345' | base64 | tr -d '\\n')
           cat > "$DOCKER_CONFIG/config.json" <<EOF
-{
-  "auths": {
-    "localhost":    { "auth": "$AUTH" },
-    "localhost:80": { "auth": "$AUTH" }
-  }
-}
+{ "auths": { "localhost": { "auth": "$AUTH" }, "localhost:80": { "auth": "$AUTH" } } }
 EOF
-          echo "Inline cgLogin: wrote Harbor admin auth for localhost and localhost:80"
         '''
       }
     }
@@ -96,14 +34,10 @@ EOF
       }
     }
 
-    // The `image` field below is BUILD_IMAGE — what cgImage('python-3.14').build
-    // would have returned: PULL_REGISTRY/python:3.14-dev@sha256:...
     stage('Build deps') {
       agent {
         docker {
-          image "${BUILD_IMAGE}"
-          // Run as root: uv needs to write to /usr/lib/python3.14/site-packages
-          // which the default uid (65532) can't touch.
+          image 'localhost/cgr-proxy/smalls.xyz/python:3.14-dev@sha256:d83b1ceb93ad3c461b19ce91aa1ec5de9390d072f9b1966176d1f1678851f860'
           args '--user 0 --entrypoint='
           reuseNode true
         }
@@ -115,15 +49,11 @@ EOF
       }
     }
 
-    // The Dockerfile picks up PULL_REGISTRY as a build-arg and uses it for
-    // both stages (`FROM ${PULL_REGISTRY}/python:3.14-dev` + the runtime FROM).
-    // Equivalent to RUNTIME_IMAGE being pulled at runtime, just resolved
-    // through tag rather than digest.
     stage('Image build') {
       agent any
       steps {
         unstash 'src'
-        sh 'docker build --build-arg PULL_REGISTRY="$PULL_REGISTRY" -t "$IMAGE" .'
+        sh 'docker build --build-arg PULL_REGISTRY=localhost/cgr-proxy/smalls.xyz -t "$IMAGE" .'
       }
     }
 
@@ -132,15 +62,14 @@ EOF
       steps {
         sh '''
           set -e
-          out=$(docker run --rm --entrypoint=python -e PYTHONPATH=/app "$IMAGE" -c "
+          docker run --rm --entrypoint=python -e PYTHONPATH=/app "$IMAGE" -c "
 from app import app
 c = app.test_client()
 r = c.get('/')
 assert r.status_code == 200, 'unexpected status: ' + str(r.status_code)
 assert b'Hello from Flask on Chainguard' in r.data, 'greeting missing'
 print('Smoke test passed')
-")
-          echo "$out"
+"
         '''
       }
     }
@@ -149,17 +78,9 @@ print('Smoke test passed')
       agent any
       steps {
         sh 'docker push "$IMAGE"'
-        sh 'docker image inspect --format "Pushed {{.RepoTags}} digest={{index .RepoDigests 0}}" "$IMAGE"'
       }
     }
 
-    // == INLINED: cgSign(env.IMAGE) =========================================
-    // Resolve the most-recent RepoDigest for this image (Docker's local
-    // cache appends without pruning, so `tail -1` picks the just-pushed
-    // one), rewrite a bare `localhost/...` ref to `localhost:80/...` so
-    // cosign's go-containerregistry parser recognizes localhost as the
-    // registry hostname, then `docker run` a one-shot cosign container
-    // with the demo's pre-generated key + password mounted in.
     stage('Sign') {
       agent any
       steps {
@@ -169,32 +90,23 @@ print('Smoke test passed')
         ]) {
           sh '''
             set -eu
-            REPO=${IMAGE%:*}
-            DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" | grep -F "${REPO}@" | tail -1)
-            if [ -z "$DIGEST" ]; then
-              echo "Inline cgSign: could not resolve digest for $IMAGE (was it pushed?)." >&2
-              exit 1
-            fi
-            case "$DIGEST" in
-              localhost/*) DIGEST="localhost:80/${DIGEST#localhost/}" ;;
-            esac
+            # Most-recent RepoDigest for this repo (re-pushes append; tail picks the latest).
+            DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" | grep -F "${IMAGE%:*}@" | tail -1)
+            # cosign's parser rejects bare 'localhost' as a registry hostname.
+            DIGEST="localhost:80/${DIGEST#localhost/}"
             docker run --rm --network host \\
               -v "$COSIGN_KEY_FILE:/cosign.key:ro" \\
               -v "$DOCKER_CONFIG:/jenkins-docker:ro" \\
               -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \\
               -e DOCKER_CONFIG=/jenkins-docker \\
               --entrypoint=/usr/bin/cosign \\
-              "$COSIGN_IMAGE" \\
+              localhost/cgr-proxy/smalls.xyz/cosign:latest-dev \\
               sign --yes --allow-http-registry --key /cosign.key "$DIGEST"
-            echo "Inline cgSign: signed $DIGEST"
           '''
         }
       }
     }
 
-    // == INLINED: cgVerify(env.IMAGE) =======================================
-    // Same digest-resolution + localhost-rewrite trick as Sign; runs the
-    // cosign container in verify mode against the public key.
     stage('Verify') {
       agent any
       steps {
@@ -203,23 +115,15 @@ print('Smoke test passed')
         ]) {
           sh '''
             set -eu
-            REPO=${IMAGE%:*}
-            DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" | grep -F "${REPO}@" | tail -1)
-            if [ -z "$DIGEST" ]; then
-              echo "Inline cgVerify: could not resolve digest for $IMAGE." >&2
-              exit 1
-            fi
-            case "$DIGEST" in
-              localhost/*) DIGEST="localhost:80/${DIGEST#localhost/}" ;;
-            esac
+            DIGEST=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$IMAGE" | grep -F "${IMAGE%:*}@" | tail -1)
+            DIGEST="localhost:80/${DIGEST#localhost/}"
             docker run --rm --network host \\
               -v "$COSIGN_PUB_FILE:/cosign.pub:ro" \\
               -v "$DOCKER_CONFIG:/jenkins-docker:ro" \\
               -e DOCKER_CONFIG=/jenkins-docker \\
               --entrypoint=/usr/bin/cosign \\
-              "$COSIGN_IMAGE" \\
+              localhost/cgr-proxy/smalls.xyz/cosign:latest-dev \\
               verify --allow-http-registry --key /cosign.pub "$DIGEST" >/dev/null
-            echo "Inline cgVerify: signature OK for $DIGEST"
           '''
         }
       }

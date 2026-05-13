@@ -1,81 +1,23 @@
-// Inlined twin of apps/corretto-java17-maven/Jenkinsfile. Every call into
-// the `cg-images` shared library — cgImage, cgLogin — is expanded to the
-// literal commands it produces, so a reader can see exactly what Jenkins
-// ends up running. This is a teaching artifact, not a recommended pattern:
-// in real pipelines the shared library makes the auth / registry / digest
-// plumbing reusable. Inlining sacrifices that reuse for visibility.
-//
-// (This pipeline only builds + tests a jar — there's no image push, so
-// there's no cgSign / cgVerify to inline. See
-// python314-uv-flask-inline/Jenkinsfile for those.)
-//
-// Hardcoded for the configuration the surrounding demo is currently running
-// under: setup.sh picked `harbor` as the mirror tool, `Push to library` for
-// the push target, AUTH_MODE=proxy, and CHAINGUARD_ORG=smalls.xyz. To run
-// this pipeline against a different mode / org, swap the registry constants
-// at the top of `environment { ... }` and the BUILD/TEST image digests
-// (which are pinned per cgr.dev org).
-//
-// Side-by-side mapping to the shared-library helpers:
-//
-//   `cgImage('corretto-java17').build`   → $BUILD_IMAGE
-//   `cgImage('corretto-java17').test`    → $TEST_IMAGE
-//   `cgLogin()` in harbor mode           → the Auth stage's `docker config
-//                                           write` snippet
+// Inlined twin of apps/corretto-java17-maven/Jenkinsfile — no shared-
+// library calls. Hardcoded for: harbor mirror, proxy auth,
+// CHAINGUARD_ORG=smalls.xyz. See README.md.
 
 pipeline {
   agent none
   options { timestamps() }
 
-  environment {
-    // -- Registry routing (normally set by setup.sh → JCasC → env) ----------
-    CHAINGUARD_ORG = 'smalls.xyz'
-    PULL_REGISTRY  = 'localhost/cgr-proxy/smalls.xyz'
-
-    // -- Base images (normally resolved by cgImage) -------------------------
-    // The shared library returns `${PULL_REGISTRY}/<repo>:<tag>@<digest>`
-    // for each token in its catalog. Digests are refreshed periodically by
-    // the `refresh-cgimages-digests` job — see
-    // jenkins/shared-libraries/cg-images/vars/cgImage.groovy for the
-    // canonical catalog.
-    BUILD_IMAGE = 'localhost/cgr-proxy/smalls.xyz/maven:3-jdk17-dev@sha256:2ef87b6d8b49cce6a4954346b20972ffee4f1259a4507e8f6f1b1abef180d5c0'
-    TEST_IMAGE  = 'localhost/cgr-proxy/smalls.xyz/amazon-corretto-jre:17-dev@sha256:a34fe97ec1f505f8db6e64651c322b4c1f135816fc993d4e2a561380be0ad1a7'
-
-    // -- Harbor admin creds (normally injected by JCasC from .env) ---------
-    // Chart default. `setup.sh` writes a different value to .env if the
-    // user set HARBOR_ADMIN_PASSWORD before running it.
-    HARBOR_ADMIN_USER = 'admin'
-    HARBOR_ADMIN_PASS = 'Harbor12345'
-  }
-
   stages {
 
-    // == INLINED: cgLogin() in harbor mode with localhost/* push target ====
-    // The shared-library function writes a DOCKER_CONFIG/config.json with
-    // basic-auth for `localhost` (used by `docker push`) and `localhost:80`
-    // (used by cosign — its reference parser rejects bare `localhost`).
-    // Both keys hold the same admin:Harbor12345 base64-encoded auth string.
-    //
-    // This pipeline doesn't push or sign anything, so strictly speaking the
-    // Harbor admin auth is unused — but pulls of $BUILD_IMAGE and $TEST_IMAGE
-    // still work because Harbor's cgr-proxy project is public. We write the
-    // config anyway so the pattern stays uniform with the other apps.
     stage('Auth') {
       agent any
       steps {
         sh '''
           set -eu
           mkdir -p "$DOCKER_CONFIG"
-          AUTH=$(printf '%s:%s' "$HARBOR_ADMIN_USER" "$HARBOR_ADMIN_PASS" | base64 | tr -d '\\n')
+          AUTH=$(printf 'admin:Harbor12345' | base64 | tr -d '\\n')
           cat > "$DOCKER_CONFIG/config.json" <<EOF
-{
-  "auths": {
-    "localhost":    { "auth": "$AUTH" },
-    "localhost:80": { "auth": "$AUTH" }
-  }
-}
+{ "auths": { "localhost": { "auth": "$AUTH" }, "localhost:80": { "auth": "$AUTH" } } }
 EOF
-          echo "Inline cgLogin: wrote Harbor admin auth for localhost and localhost:80"
         '''
       }
     }
@@ -88,15 +30,10 @@ EOF
       }
     }
 
-    // The `image` field below is $BUILD_IMAGE — what
-    // cgImage('corretto-java17').build would have returned:
-    // PULL_REGISTRY/maven:3-jdk17-dev@sha256:...
     stage('Build') {
       agent {
         docker {
-          image "${BUILD_IMAGE}"
-          // Chainguard images set ENTRYPOINT to the main binary; clear it so
-          // Jenkins' `cat` command keeps the container alive for `docker exec`.
+          image 'localhost/cgr-proxy/smalls.xyz/maven:3-jdk17-dev@sha256:2ef87b6d8b49cce6a4954346b20972ffee4f1259a4507e8f6f1b1abef180d5c0'
           args '--entrypoint='
           reuseNode true
         }
@@ -108,13 +45,10 @@ EOF
       }
     }
 
-    // The `image` field below is $TEST_IMAGE — what
-    // cgImage('corretto-java17').test would have returned:
-    // PULL_REGISTRY/amazon-corretto-jre:17-dev@sha256:...
     stage('Test') {
       agent {
         docker {
-          image "${TEST_IMAGE}"
+          image 'localhost/cgr-proxy/smalls.xyz/amazon-corretto-jre:17-dev@sha256:a34fe97ec1f505f8db6e64651c322b4c1f135816fc993d4e2a561380be0ad1a7'
           args '--entrypoint='
           reuseNode true
         }
