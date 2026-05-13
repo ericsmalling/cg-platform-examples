@@ -12,6 +12,10 @@ def apps = [
     description: 'Spring Boot built with Maven on Chainguard Corretto JDK 17 images',
   ],
   [
+    name: 'corretto-java17-maven-inline',
+    description: 'Teaching twin of corretto-java17-maven — same pipeline with every cg-images shared-library call (cgImage/cgLogin) expanded inline for visibility. Hardcoded for Harbor proxy mode.',
+  ],
+  [
     name: 'adoptium-java8-jetty',
     description: 'Jetty/JSP runnable WAR built on Chainguard Adoptium JDK 8 images',
   ],
